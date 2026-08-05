@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipwork"
+version = "0.1.0b1"
+description = "Offline media toolkit — convert, compress, trim. Free forever, no uploads."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Sekiboi" }]
+keywords = ["video", "audio", "image", "ffmpeg", "offline", "freeware"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia",
+]
+dependencies = [
+  "customtkinter>=5.2.0",
+  "Pillow>=10.0.0",
+  "tkinterdnd2>=0.3.0",
+]
+
+[project.scripts]
+clipwork = "clipwork.cli:main"
+clipwork-gui = "clipwork.app:main"
+
+[project.urls]
+Homepage = "https://github.com/Sekiboi/clipwork"
+Repository = "https://github.com/Sekiboi/clipwork"
+Issues = "https://github.com/Sekiboi/clipwork/issues"
+
+[tool.setuptools.packages.find]
+include = ["clipwork*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
