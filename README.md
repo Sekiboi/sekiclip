@@ -1,8 +1,8 @@
 # Clipwork
 
-Offline media toolkit for Windows. Convert, compress, trim, and fix common **video, audio, and image** files on your PC — **no accounts, no uploads, no paid tier**.
+Offline media editor for Windows. Preview video and audio, scrub a timeline, set In/Out, and export — convert, compress, trim, and fix common files on your PC. **No accounts, no uploads, no paid tier.**
 
-Requires **ffmpeg** on PATH (or under `vendor/`) for video and audio.
+Requires **ffmpeg** on PATH (or under `vendor/`) for video and audio. Preview uses **OpenCV** (bundled via pip).
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -17,12 +17,13 @@ Requires **ffmpeg** on PATH (or under `vendor/`) for video and audio.
 
 | Area | Tools |
 |------|--------|
-| **Video** | Convert, compress presets, trim, remux, rotate, strip audio, frame grab, concat |
+| **Visual editor** | Video frame preview, audio waveform, play/pause, timeline scrub, In/Out marks, export progress |
+| **Video** | Convert, compress presets, trim (from In/Out), remux, rotate, strip audio, frame grab, concat |
 | **Audio** | Convert, compress, extract from video, normalize, mono |
 | **Image** | Convert, resize, compress, rotate, flip, strip EXIF, images→PDF |
-| **CLI** | Same toolkit from the command line |
+| **CLI** | Same transform toolkit from the command line |
 
-This is a **file toolkit**, not a timeline editor (no multi-track NLE, effects suite, or DAW).
+Single-file focused editing (not a multi-track NLE or effects suite).
 
 See [docs/LIMITS.md](docs/LIMITS.md).
 

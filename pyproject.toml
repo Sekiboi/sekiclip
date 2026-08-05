@@ -21,6 +21,7 @@ dependencies = [
   "customtkinter>=5.2.0",
   "Pillow>=10.0.0",
   "tkinterdnd2>=0.3.0",
+  "opencv-python-headless>=4.8.0",
 ]
 
 [project.scripts]

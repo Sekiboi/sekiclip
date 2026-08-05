@@ -2,7 +2,16 @@
 
 ## What it is
 
-Offline **file toolkit** for common convert / compress / trim jobs. Not a full creative suite.
+Offline **visual media editor** for common convert / compress / trim jobs: preview, timeline scrub, In/Out, export progress.
+
+Not a multi-track NLE, color grading suite, or DAW.
+
+## Preview
+
+- **Video:** OpenCV frame scrub + play (not audio monitoring during play in v1).
+- **Audio:** Waveform overview via ffmpeg; playhead on the waveform.
+- **Image:** Still preview.
+- Preview is for timing decisions; final quality is the exported file.
 
 ## ffmpeg
 
