@@ -157,6 +157,9 @@ class ClipworkApp(_CTkBase):
         self._layout_ready = False
         self._pending_reload_path: Path | None = None  # re-open after in-place replace
         self._suppress_preview_trace = False  # avoid feedback loops when resetting looks
+        self._resume_after_scrub = False
+        self._scrub_play_mode = "full"
+        self._scrub_loop = False
 
         self._build()
         self._set_icons()
@@ -323,6 +326,7 @@ class ClipworkApp(_CTkBase):
             self._tl_host,
             on_change=self._on_timeline_change,
             on_seek=self._on_timeline_seek,
+            on_seek_end=self._on_timeline_seek_end,
             height=56,
             bg="#1a1a1e",
         )
@@ -1523,16 +1527,43 @@ class ClipworkApp(_CTkBase):
         self._sync_time_fields()
         # Fades are relative to In/Out — refresh so edges stay correct
         self._repaint_preview_from_cache()
+        # If playing, rebuild audio window so fade length stays exact
+        if self._session.playing and not self._scrub_dragging:
+            self._sync_preview_audio()
+            try:
+                self._session.restart_audio_from_position()
+            except Exception:
+                pass
 
     def _on_timeline_seek(self, t: float) -> None:
+        """Scrub playhead (motion): show correct frame/looks; pause A/V until release."""
         self._scrub_dragging = True
-        self._session.stop()
-        self.btn_play.configure(text="Play")
+        if self._session.playing:
+            self._resume_after_scrub = True
+            self._scrub_play_mode = getattr(self._session, "_play_mode", "full")
+            self._scrub_loop = bool(getattr(self._session, "_loop_selection", False))
+            self._session.stop()
+            self.btn_play.configure(text="Play")
         self._session.seek(t)
-        self._update_time_labels(t, self._session.duration)
-        self._scrub_dragging = False
-        # Seek already emits a frame; ensure fade overlay is current
+        self._update_time_labels(self._session.position, self._session.duration)
+        # Frame + video fades/crop/logo at this time
         self._repaint_preview_from_cache()
+
+    def _on_timeline_seek_end(self, t: float) -> None:
+        """Mouse-up on timeline: resume play from here with correct audio filters."""
+        self._session.seek(t)
+        self._update_time_labels(self._session.position, self._session.duration)
+        self._repaint_preview_from_cache()
+        self._scrub_dragging = False
+        if self._resume_after_scrub:
+            self._resume_after_scrub = False
+            self._sync_preview_audio()
+            self._session.resume_from(
+                t,
+                selection_only=(self._scrub_play_mode == "selection"),
+                loop=self._scrub_loop,
+            )
+            self.btn_play.configure(text="Pause")
 
     def _update_time_labels(self, pos: float, dur: float) -> None:
         self.time_label.configure(text=f"{format_time(pos)} / {format_time(dur)}")

@@ -447,14 +447,14 @@ def render_cut(
         a_parts.append(f"atempo={remaining:.6f}")
     afi = max(0.0, float(audio_fade_in))
     afo = max(0.0, float(audio_fade_out))
-    # exp curve is easier to hear than the default linear ramp
+    # tri curve ≈ linear loudness; UI seconds match heard length closely
     if afi > 0:
         d = min(afi, max_each)
-        a_parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=exp")
+        a_parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=tri")
     if afo > 0:
         d = min(afo, max_each)
         st = max(0.0, out_dur - d)
-        a_parts.append(f"afade=t=out:st={st:.4f}:d={d:.4f}:curve=exp")
+        a_parts.append(f"afade=t=out:st={st:.4f}:d={d:.4f}:curve=tri")
     # Keep audio as long as the video cut (avoids hard stop if stream is slightly short)
     if has_audio and out_dur > 0:
         a_parts.append(f"apad=whole_dur={out_dur:.4f}")

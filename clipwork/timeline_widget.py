@@ -24,6 +24,7 @@ class RangeTimeline(tk.Canvas):
         *,
         on_change: Callable[[float, float, float], None] | None = None,
         on_seek: Callable[[float], None] | None = None,
+        on_seek_end: Callable[[float], None] | None = None,
         **kwargs: object,
     ) -> None:
         kwargs.setdefault("height", self.H)
@@ -32,6 +33,7 @@ class RangeTimeline(tk.Canvas):
         super().__init__(master, **kwargs)  # type: ignore[arg-type]
         self.on_change = on_change
         self.on_seek = on_seek
+        self.on_seek_end = on_seek_end
         self.duration = 1.0
         self.in_t = 0.0
         self.out_t = 1.0
@@ -210,8 +212,11 @@ class RangeTimeline(tk.Canvas):
             self.on_seek(self.pos)
 
     def _release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
-        if self._drag in ("in", "out", "pos", "range") and self.on_seek:
-            self.on_seek(self.pos)
+        if self._drag in ("in", "out", "pos", "range"):
+            if self.on_seek:
+                self.on_seek(self.pos)
+            if self.on_seek_end:
+                self.on_seek_end(self.pos)
         self._drag = None
 
     def _double(self, event: tk.Event) -> None:  # type: ignore[type-arg]

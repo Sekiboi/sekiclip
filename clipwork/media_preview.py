@@ -175,6 +175,7 @@ class MediaSession:
         self.preview_speed: float = 1.0
         self._play_start_at: float = 0.0
         self._play_end_at: float = 0.0
+        self._play_mode: str = "full"  # "full" | "selection"
 
     @property
     def duration(self) -> float:
@@ -464,10 +465,15 @@ class MediaSession:
         gen = self._play_gen
         self._playing = True
         self._loop_selection = bool(loop)
+        self._play_mode = "selection" if selection_only else "full"
 
         if selection_only:
-            start_at = self.in_point
             end_at = self.out_or_end if self.out_or_end > 0 else self.duration
+            # Resume mid-selection when playhead is already inside In→Out (scrub-while-play)
+            if self.in_point <= self.position < end_at - 0.05:
+                start_at = self.position
+            else:
+                start_at = self.in_point
             self.seek(start_at, emit=True)
         else:
             start_at = self.position
@@ -519,83 +525,95 @@ class MediaSession:
             except Exception:
                 pass
 
-    def _preview_af_filters(self, start_seconds: float, end_seconds: float | None) -> str | None:
-        """Build ffplay -af chain matching export: volume, atempo, afade."""
+    def _clamp_play_window(self, start_seconds: float, end_seconds: float | None) -> tuple[float, float]:
+        """Return source [start, end] for preview audio/video play."""
         start = max(0.0, float(start_seconds))
-        speed = max(0.25, min(4.0, float(self.preview_speed)))
-        if end_seconds is not None and end_seconds > start:
-            src_span = float(end_seconds) - start
+        dur = self.duration if self.duration > 0 else 0.0
+        if end_seconds is None or end_seconds > 1e8:
+            end = self.out_or_end if self.out_or_end > start else dur
         else:
-            src_span = max(0.05, self.duration - start) if self.duration > 0 else 0.05
-        # After atempo, wall-clock duration of the played segment
-        play_dur = src_span / speed if speed > 1e-6 else src_span
-        if play_dur <= 0:
-            play_dur = 0.05
+            end = float(end_seconds)
+        if dur > 0:
+            end = min(end, dur)
+            start = min(start, max(0.0, dur - 0.05))
+        if end <= start:
+            end = start + 0.05
+        return start, end
 
-        parts: list[str] = []
+    def _preview_af_filters(self, start: float, end: float) -> str:
+        """Export-identical audio chain: atrim → asetpts → volume → atempo → afade.
+
+        UI fade seconds are output seconds after speed (same as render_cut).
+        atrim keeps PTS clean so a 1s fade is exactly 1s (not ~10s from -ss quirks).
+        """
+        start, end = float(start), float(end)
+        speed = max(0.25, min(4.0, float(self.preview_speed)))
+        src_len = max(0.05, end - start)
+        out_len = src_len / speed
+
+        parts: list[str] = [
+            f"atrim=start={start:.4f}:end={end:.4f}",
+            "asetpts=PTS-STARTPTS",
+        ]
         vol = 0.0 if self.preview_mute else max(0.0, min(4.0, float(self.preview_volume)))
         if abs(vol - 1.0) > 1e-3 or self.preview_mute:
             parts.append(f"volume={vol:.4f}")
-
         parts.extend(atempo_chain(speed))
 
-        # Fades on *output* clock after tempo (same as export: afade after atempo)
         inn = float(self.in_point)
-        outp = float(self.out_or_end) if self.out_or_end > 0 else (start + src_span)
-        sel_dur = max(0.05, outp - inn)
-        out_sel = sel_dur / speed if speed > 1e-6 else sel_dur
+        outp = float(self.out_or_end) if self.out_or_end > 0 else end
+        sel_src = max(0.05, outp - inn)
+        out_sel = sel_src / speed
         max_each = max(0.05, out_sel * 0.49)
+
         afi = max(0.0, float(self.preview_audio_fade_in))
         afo = max(0.0, float(self.preview_audio_fade_out))
+        out_off = max(0.0, (start - inn) / speed) if start >= inn - 1e-6 else 0.0
 
-        # Map play window onto output selection clock when playing from In
         if afi > 0 and start <= inn + 0.05:
-            d = min(afi, max_each, play_dur * 0.49)
-            if d > 0.01:
-                parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=exp")
+            d = min(afi, max_each, out_len * 0.98)
+            if d > 0.02:
+                parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=tri")
 
-        if afo > 0 and (end_seconds is None or end_seconds >= outp - 0.05):
-            d = min(afo, max_each, play_dur * 0.49)
-            # When play starts at `start`, output t=0 is source `start`.
-            # Fade on export is on selection output: st = out_sel - d.
-            # Within this play segment (from selection start): st = out_sel - d - (start-inn)/speed
-            if start <= inn + 0.05:
-                st = max(0.0, out_sel - d)
-            else:
-                # Mid-selection play: source fade at outp-d → play offset
-                fade_src = outp - min(afo, sel_dur * 0.49)
-                st = (fade_src - start) / speed if speed > 1e-6 else (fade_src - start)
-            if d > 0.01 and st < play_dur - 0.01:
-                parts.append(f"afade=t=out:st={max(0.0, st):.4f}:d={d:.4f}:curve=exp")
+        if afo > 0 and end >= outp - 0.05:
+            # Exact UI value (e.g. 1.0s), only capped by selection length
+            d = min(afo, max_each, out_len * 0.98)
+            st = (out_sel - d) - out_off
+            if d > 0.02:
+                if st >= out_len - 0.02:
+                    pass
+                elif st <= 0:
+                    remaining = d + st
+                    if remaining > 0.02:
+                        parts.append(f"afade=t=out:st=0:d={remaining:.4f}:curve=tri")
+                else:
+                    parts.append(f"afade=t=out:st={st:.4f}:d={d:.4f}:curve=tri")
 
-        return ",".join(parts) if parts else None
+        return ",".join(parts)
 
     def _start_audio(self, start_seconds: float, end_seconds: float | None = None) -> bool:
-        """Play audio with ffplay (no video window). Instant — no temp decode."""
+        """Play audio with ffplay using the same filter chain shape as export."""
         if not self.path:
             return False
         ffplay = find_ffplay()
         if not ffplay:
             return False
         self._stop_audio()
-        start = max(0.0, float(start_seconds))
-        # -ss before -i: fast seek for preview
+        start, end = self._clamp_play_window(start_seconds, end_seconds)
+        # No -ss before -i: atrim keeps timestamps deterministic (fixes wrong fade length)
+        af = self._preview_af_filters(start, end)
         cmd: list[str] = [
             str(ffplay),
             "-nodisp",
             "-autoexit",
             "-loglevel",
             "error",
-            "-ss",
-            f"{start:.3f}",
+            "-i",
+            str(self.path),
+            "-vn",
+            "-af",
+            af,
         ]
-        if end_seconds is not None and end_seconds > start:
-            # Source duration to pull; atempo shortens wall clock
-            cmd.extend(["-t", f"{(float(end_seconds) - start):.3f}"])
-        cmd.extend(["-i", str(self.path), "-vn"])
-        af = self._preview_af_filters(start, end_seconds)
-        if af:
-            cmd.extend(["-af", af])
         try:
             creation = 0
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -613,13 +631,27 @@ class MediaSession:
             return False
 
     def restart_audio_from_position(self) -> None:
-        """Re-apply current volume/fade/speed filters from the playhead (live look changes)."""
+        """Re-apply current volume/fade/speed filters from the playhead."""
         if not self._playing or not self.path:
             return
         end = self._play_end_at if self._play_end_at > self.position else self.out_or_end
         if end <= self.position + 0.05:
             end = self.out_or_end if self.out_or_end > self.position else self.duration
         self._start_audio(self.position, end if end < 1e8 else None)
+
+    def resume_from(
+        self,
+        seconds: float,
+        *,
+        selection_only: bool | None = None,
+        loop: bool | None = None,
+    ) -> None:
+        """Seek and continue playback with correct A/V (timeline scrub while playing)."""
+        sel = self._play_mode == "selection" if selection_only is None else bool(selection_only)
+        do_loop = self._loop_selection if loop is None else bool(loop)
+        self.stop()
+        self.seek(seconds, emit=True)
+        self.play(selection_only=sel, loop=do_loop)
 
     def _play_loop(self, gen: int, start_at: float, end_at: float) -> None:
         """Clock-driven playback: sequential video frames + synced audio (respects speed)."""
