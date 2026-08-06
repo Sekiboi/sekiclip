@@ -21,7 +21,7 @@ from typing import Callable
 from PIL import Image, ImageDraw
 
 from clipwork.media_ops.ffmpeg_util import find_ffmpeg, probe, require_ffmpeg
-from clipwork.preview_match import atempo_chain
+from clipwork.preview_match import CutTimeline, build_audio_filter
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".mpeg", ".mpg", ".ts", ".mts"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus"}
@@ -549,59 +549,28 @@ class MediaSession:
             end = start + 0.05
         return start, end
 
+    def _cut_timeline(self) -> CutTimeline:
+        """In→Out cut used for fades/play (same bounds as export)."""
+        outp = self.out_or_end if self.out_or_end > 0 else max(self.in_point + 0.05, self.duration)
+        return CutTimeline(
+            in_point=self.in_point,
+            out_point=outp,
+            speed=max(0.25, min(4.0, float(self.preview_speed))),
+        )
+
     def _preview_af_filters(self, start: float, end: float) -> str:
-        """Export-identical audio chain: atrim → asetpts → volume → atempo → afade.
-
-        UI fade seconds are output seconds after speed (same as render_cut).
-        atrim keeps PTS clean so a 1s fade is exactly 1s (not ~10s from -ss quirks).
-        """
+        """Export-identical audio chain via shared build_audio_filter."""
         start, end = float(start), float(end)
-        speed = max(0.25, min(4.0, float(self.preview_speed)))
-        src_len = max(0.05, end - start)
-        out_len = src_len / speed
-
-        parts: list[str] = [
-            f"atrim=start={start:.4f}:end={end:.4f}",
-            "asetpts=PTS-STARTPTS",
-        ]
-        vol = 0.0 if self.preview_mute else max(0.0, min(4.0, float(self.preview_volume)))
-        if abs(vol - 1.0) > 1e-3 or self.preview_mute:
-            parts.append(f"volume={vol:.4f}")
-        parts.extend(atempo_chain(speed))
-
-        inn = float(self.in_point)
-        outp = float(self.out_or_end) if self.out_or_end > 0 else end
-        sel_src = max(0.05, outp - inn)
-        out_sel = sel_src / speed
-
-        from clipwork.preview_match import fit_fades
-
-        afi_raw = max(0.0, float(self.preview_audio_fade_in))
-        afo_raw = max(0.0, float(self.preview_audio_fade_out))
-        # Fades sized on full selection output length (export), then mapped into this window
-        afi, afo = fit_fades(out_sel, afi_raw, afo_raw)
-        out_off = max(0.0, (start - inn) / speed) if start >= inn - 1e-6 else 0.0
-
-        if afi > 0 and start <= inn + 0.05:
-            d = min(afi, out_len * 0.98)
-            if d > 0.02:
-                parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=tri")
-
-        if afo > 0 and end >= outp - 0.05:
-            # Fade-out starts exactly `afo` output-seconds before selection Out
-            d = min(afo, out_len * 0.98)
-            st = (out_sel - d) - out_off  # relative to this play window
-            if d > 0.02:
-                if st >= out_len - 0.02:
-                    pass
-                elif st <= 0:
-                    remaining = d + st
-                    if remaining > 0.02:
-                        parts.append(f"afade=t=out:st=0:d={remaining:.4f}:curve=tri")
-                else:
-                    parts.append(f"afade=t=out:st={st:.4f}:d={d:.4f}:curve=tri")
-
-        return ",".join(parts)
+        cut = self._cut_timeline()
+        return build_audio_filter(
+            start=start,
+            end=end,
+            cut=cut,
+            volume=float(self.preview_volume),
+            mute=bool(self.preview_mute),
+            audio_fade_in=float(self.preview_audio_fade_in),
+            audio_fade_out=float(self.preview_audio_fade_out),
+        )
 
     def _start_audio(self, start_seconds: float, end_seconds: float | None = None) -> bool:
         """Play audio with ffplay using the same filter chain shape as export."""

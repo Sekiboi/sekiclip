@@ -414,23 +414,20 @@ def render_cut(
         if srt_p.is_file():
             sub = str(srt_p.resolve()).replace("\\", "/").replace(":", "\\:")
             v_parts.append(f"subtitles='{sub}'")
-    from clipwork.preview_match import fit_fades
+    from clipwork.preview_match import atempo_chain, export_fade_filter_pairs
 
-    # Fades on the *output* cut timeline (after speed). N seconds before the end.
-    vfi_raw = max(0.0, float(video_fade_in))
-    vfo_raw = max(0.0, float(video_fade_out))
-    afi_raw = max(0.0, float(audio_fade_in))
-    afo_raw = max(0.0, float(audio_fade_out))
-    vfi, vfo = fit_fades(out_dur, vfi_raw, vfo_raw)
-    afi, afo = fit_fades(out_dur, afi_raw, afo_raw)
-    if vfi > 0:
-        v_parts.append(f"fade=t=in:st=0:d={vfi:.4f}")
-    if vfo > 0:
-        # Starts exactly vfo seconds before the end of the cut
-        v_parts.append(f"fade=t=out:st={max(0.0, out_dur - vfo):.4f}:d={vfo:.4f}")
+    # Fades on the *output* cut timeline (after speed). N seconds before Out.
+    v_fade_bits, a_fade_bits = export_fade_filter_pairs(
+        out_dur,
+        float(video_fade_in),
+        float(video_fade_out),
+        float(audio_fade_in),
+        float(audio_fade_out),
+    )
+    v_parts.extend(v_fade_bits)
 
     # --- audio filters ---
-    # Order: trim → reset timestamps → tempo/volume → afade (afade times are on output clock)
+    # Order: trim → reset timestamps → tempo/volume → afade (same as preview_match)
     a_parts: list[str] = [
         f"atrim=start={start}:end={end}",
         "asetpts=PTS-STARTPTS",
@@ -441,21 +438,8 @@ def render_cut(
         vol = max(0.0, float(volume))
         if abs(vol - 1.0) > 1e-3:
             a_parts.append(f"volume={vol}")
-    if abs(sp - 1.0) > 1e-3:
-        remaining = sp
-        while remaining > 2.0 + 1e-6:
-            a_parts.append("atempo=2.0")
-            remaining /= 2.0
-        while remaining < 0.5 - 1e-6:
-            a_parts.append("atempo=0.5")
-            remaining /= 0.5
-        a_parts.append(f"atempo={remaining:.6f}")
-    # tri curve ≈ linear loudness; duration matches the UI seconds
-    if afi > 0:
-        a_parts.append(f"afade=t=in:st=0:d={afi:.4f}:curve=tri")
-    if afo > 0:
-        # Starts exactly afo seconds before the end of the cut
-        a_parts.append(f"afade=t=out:st={max(0.0, out_dur - afo):.4f}:d={afo:.4f}:curve=tri")
+    a_parts.extend(atempo_chain(sp))
+    a_parts.extend(a_fade_bits)
     # Keep audio as long as the video cut (avoids hard stop if stream is slightly short)
     if has_audio and out_dur > 0:
         a_parts.append(f"apad=whole_dur={out_dur:.4f}")

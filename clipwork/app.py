@@ -24,7 +24,13 @@ from clipwork.media_ops.ffmpeg_util import (
     request_cancel,
     staging_path,
 )
-from clipwork.preview_match import active_subs, fade_strength, fit_fades, load_srt_cached
+from clipwork.preview_match import (
+    CutTimeline,
+    active_subs,
+    fit_fades,
+    load_srt_cached,
+    video_fade_strength_at_source,
+)
 from clipwork.media_preview import (
     MediaSession,
     format_time,
@@ -594,9 +600,9 @@ class ClipworkApp(_CTkBase):
         fr = self._panels["Edit"]
         ctk.CTkLabel(
             fr,
-            text="Live preview = export look\n"
-            "(fades, volume, speed, crop, logo, subs).\n"
-            "Timeline In/Out set the cut range.",
+            text="Live preview = export look.\n"
+            "In→Out is the cut. Fade out = last N seconds\n"
+            "before Out (same in preview and file).",
             wraplength=260,
             justify="left",
             text_color=("gray30", "gray70"),
@@ -1169,9 +1175,11 @@ class ClipworkApp(_CTkBase):
         outp = float(look["end"] or self._session.duration or 0)
         if outp <= inn:
             outp = inn + 0.05
-        sel_dur = max(0.05, outp - inn)
-        t_rel = t - inn
-        outside = t < inn - 1e-3 or t > outp + 1e-3
+        speed = float(look.get("speed") or 1.0)
+        cut = CutTimeline(in_point=inn, out_point=outp, speed=speed)
+        sel_dur = cut.source_duration
+        out_dur = cut.output_duration
+        outside = not cut.contains_source(t)
 
         # Crop: export crops; preview zooms crop to stage (or handles while adjusting)
         use_crop = bool(look.get("use_crop"))
@@ -1261,13 +1269,13 @@ class ClipworkApp(_CTkBase):
             except Exception:
                 pass
 
-        # Video fades: start exactly N seconds before Out (fit_fades never expands N)
+        # Video fades on *output* cut time (UI N = last N seconds of exported clip)
         vfi = float(look["video_fade_in"])
         vfo = float(look["video_fade_out"])
-        vfi_fit, vfo_fit = fit_fades(sel_dur, vfi, vfo)
+        vfi_fit, vfo_fit = fit_fades(out_dur, vfi, vfo)
         strength = 0.0
         if not outside:
-            strength = fade_strength(t_rel, sel_dur, vfi, vfo)
+            strength = video_fade_strength_at_source(cut, t, vfi, vfo)
         if strength > 0.001:
             rgb = img.convert("RGB")
             black = Image.new("RGB", (w, h), (0, 0, 0))
@@ -1301,13 +1309,16 @@ class ClipworkApp(_CTkBase):
             if vfi > 0 or vfo > 0:
                 badges.append(f"V-fade {vfi:g}/{vfo:g}s")
             if vfo_fit > 0 and not outside:
-                # When fade-out actually begins (absolute source time)
-                fade_start_abs = inn + (sel_dur - vfo_fit)
-                if t + 0.05 >= fade_start_abs:
-                    left = max(0.0, outp - t)
+                # Output-seconds before Out remaining in the fade window
+                t_out = cut.source_to_output(t)
+                fade_start_out = out_dur - vfo_fit
+                if t_out + 0.05 >= fade_start_out:
+                    left = max(0.0, out_dur - t_out)
                     badges.append(f"OUT {left:.1f}s left")
                 else:
-                    badges.append(f"out@{format_time(fade_start_abs)}")
+                    # Absolute source time when fade-out begins
+                    fade_start_src = cut.output_to_source(fade_start_out)
+                    badges.append(f"out@{format_time(fade_start_src)}")
             if strength > 0.05 and not outside:
                 badges.append("FADING")
             if look.get("use_subs"):
