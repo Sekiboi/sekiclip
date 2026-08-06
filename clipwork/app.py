@@ -570,7 +570,9 @@ class ClipworkApp(_CTkBase):
         fr = self._panels["Trim"]
         ctk.CTkLabel(
             fr,
-            text="Uses timeline In/Out marks.\nRe-encode recommended for accuracy.",
+            text="Uses timeline In/Out marks.\n"
+            "Re-encode recommended for accuracy.\n"
+            "Video/audio fades from Edit apply here too.",
             justify="left",
             wraplength=260,
         ).pack(anchor="w", pady=4)
@@ -722,7 +724,8 @@ class ClipworkApp(_CTkBase):
             justify="left",
         ).pack(anchor="w")
 
-        self._on_tool_change("Trim")
+        # Default to Edit so fades/looks are on the main path (WYSIWYG + export)
+        self._select_tool("Edit")
 
     def _pick_srt(self) -> None:
         p = filedialog.askopenfilename(
@@ -1160,7 +1163,7 @@ class ClipworkApp(_CTkBase):
             except Exception:
                 pass
 
-        # Video fade relative to In/Out (matches export)
+        # Video fade relative to In/Out (matches export). Use RGB blend — reliable on all Pillow builds.
         vfi = vfo = 0.0
         try:
             if a.get("fade_video"):
@@ -1168,27 +1171,32 @@ class ClipworkApp(_CTkBase):
                 vfo = max(0.0, float(a.get("v_fade_out") or 0))
         except Exception:
             pass
-        fade_alpha = 0
-        if not outside and (vfi > 0 or vfo > 0):
-            if vfi > 0 and t_rel < vfi:
-                # t=0 → black; t=vfi → clear
-                fade_alpha = int(255 * (1.0 - max(0.0, min(1.0, t_rel / max(vfi, 1e-6)))))
-            if vfo > 0 and t_rel > sel_dur - vfo:
-                into = t_rel - (sel_dur - vfo)
-                fade_alpha = max(
-                    fade_alpha, int(255 * max(0.0, min(1.0, into / max(vfo, 1e-6))))
+        # Clamp fade lengths so short selections still show a ramp
+        vfi_c = min(vfi, sel_dur * 0.49) if vfi > 0 else 0.0
+        vfo_c = min(vfo, sel_dur * 0.49) if vfo > 0 else 0.0
+        fade_strength = 0.0  # 0 = full picture, 1 = full black
+        if not outside and (vfi_c > 0 or vfo_c > 0):
+            if vfi_c > 0 and t_rel < vfi_c:
+                fade_strength = max(
+                    fade_strength, 1.0 - max(0.0, min(1.0, t_rel / max(vfi_c, 1e-6)))
                 )
-        # Must alpha-composite — Draw() with alpha overwrites RGB to pure black
-        if fade_alpha > 0:
-            img = Image.alpha_composite(
-                img, Image.new("RGBA", (w, h), (0, 0, 0, fade_alpha))
-            )
+            if vfo_c > 0 and t_rel > sel_dur - vfo_c:
+                into = t_rel - (sel_dur - vfo_c)
+                fade_strength = max(
+                    fade_strength, max(0.0, min(1.0, into / max(vfo_c, 1e-6)))
+                )
+        if fade_strength > 0.001:
+            rgb = img.convert("RGB")
+            black = Image.new("RGB", (w, h), (0, 0, 0))
+            rgb = Image.blend(rgb, black, min(1.0, fade_strength))
+            img = rgb.convert("RGBA")
             d = ImageDraw.Draw(img, "RGBA")
 
         if outside and self._session.info and self._session.duration > 0:
-            img = Image.alpha_composite(
-                img, Image.new("RGBA", (w, h), (0, 0, 0, 150))
-            )
+            rgb = img.convert("RGB")
+            black = Image.new("RGB", (w, h), (0, 0, 0))
+            rgb = Image.blend(rgb, black, 0.55)
+            img = rgb.convert("RGBA")
             d = ImageDraw.Draw(img, "RGBA")
 
         badges: list[str] = []
@@ -1211,6 +1219,8 @@ class ClipworkApp(_CTkBase):
                     badges.append(f"A-fade {afi:g}/{afo:g}s")
             if vfi > 0 or vfo > 0:
                 badges.append(f"V-fade {vfi:g}/{vfo:g}s")
+            if fade_strength > 0.05 and not outside:
+                badges.append("FADING")
             if a.get("use_subs") and a.get("srt_path"):
                 badges.append("SUBS")
             if a.get("use_crop") or self._crop_mode:
@@ -1382,12 +1392,14 @@ class ClipworkApp(_CTkBase):
             fitted = self._draw_overlays(fitted, t)
             w, h = stage
             try:
+                # Fresh CTkImage each paint so fade/look changes always show
                 light = fitted
                 dark = fitted.copy()
                 ctk_img = ctk.CTkImage(light_image=light, dark_image=dark, size=(w, h))
                 self._preview_photo = ctk_img
                 if self._tk_preview is not None:
                     self._tk_preview.place_forget()
+                self.preview_label.configure(image=None)  # force detach old image
                 self.preview_label.configure(image=ctk_img, text="")
                 self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
                 return
@@ -1433,6 +1445,8 @@ class ClipworkApp(_CTkBase):
         self._session.position = pos
         self._update_io_label()
         self._sync_time_fields()
+        # Fades are relative to In/Out — refresh so edges stay correct
+        self._repaint_preview_from_cache()
 
     def _on_timeline_seek(self, t: float) -> None:
         self._scrub_dragging = True
@@ -1441,6 +1455,8 @@ class ClipworkApp(_CTkBase):
         self._session.seek(t)
         self._update_time_labels(t, self._session.duration)
         self._scrub_dragging = False
+        # Seek already emits a frame; ensure fade overlay is current
+        self._repaint_preview_from_cache()
 
     def _update_time_labels(self, pos: float, dur: float) -> None:
         self.time_label.configure(text=f"{format_time(pos)} / {format_time(dur)}")
@@ -2501,6 +2517,46 @@ class ClipworkApp(_CTkBase):
             reenc = bool(self.var_reencode.get())
             out_path = dest
             suffix = dest.suffix or src.suffix or ".mp4"
+            vfi, vfo, afi, afo = self._fade_seconds()
+            has_fades = (vfi > 0 or vfo > 0 or afi > 0 or afo > 0) and suffix.lower() not in (
+                ".mp3",
+                ".wav",
+                ".flac",
+                ".m4a",
+                ".ogg",
+                ".aac",
+            )
+            # Fades require a re-encode — use one-pass cut so Trim matches the preview
+            if has_fades:
+                note(
+                    f"  Trim + fades (video {vfi:.2f}/{vfo:.2f}s · audio {afi:.2f}/{afo:.2f}s)"
+                )
+                note(
+                    f"  Cutting {format_time(start)} → {format_time(end or 0)}"
+                    + (f" ({format_time(dur)})" if dur else "")
+                )
+                prog(0.03, "Trim: encoding with fades…")
+                try:
+                    out = ops.render_cut(
+                        src,
+                        out_path,
+                        start=start,
+                        end=end if end else None,
+                        video_fade_in=vfi,
+                        video_fade_out=vfo,
+                        audio_fade_in=afi,
+                        audio_fade_out=afo,
+                        crf=23,
+                        preset="veryfast",
+                        on_progress=prog,
+                    )
+                except CancelledError:
+                    note("  Trim cancelled.")
+                    raise
+                note(f"  Writing finished: {Path(out).name}")
+                prog(1.0, "100% · done")
+                return finish([str(out)])
+
             mode = "re-encode (accurate)" if reenc else "stream copy (fast)"
             note(f"  Trim mode: {mode}")
             note(
