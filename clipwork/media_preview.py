@@ -373,10 +373,19 @@ class MediaSession:
             pass
         return self.position
 
-    def seek(self, seconds: float, *, emit: bool = True) -> None:
-        """Seek playhead. Stops playback. emit=False skips UI (used internally)."""
-        was_playing = self._playing
-        if was_playing:
+    def seek(
+        self,
+        seconds: float,
+        *,
+        emit: bool = True,
+        stop_playback: bool = True,
+    ) -> None:
+        """Seek playhead to an exact source time.
+
+        Always keeps ``position`` and emit time as the requested ``seconds``
+        (never OpenCV CAP_PROP_POS_MSEC — that clock drifts and caused early fades).
+        """
+        if stop_playback and self._playing:
             self.stop()
         with self._lock:
             if not self.info:
@@ -386,6 +395,7 @@ class MediaSession:
                 seconds = max(0.0, min(float(seconds), dur))
             else:
                 seconds = max(0.0, float(seconds))
+            # Authoritative playhead — do not overwrite with decoder time
             self.position = seconds
 
             if self.info.kind == MediaKind.IMAGE and self._image is not None:
@@ -403,19 +413,26 @@ class MediaSession:
                             seconds,
                         )
                     return
-                # Prefer frame index for more stable seeks
+                # Frame index is more stable than MSEC for scrubbing
                 if self._fps > 1:
                     frame_idx = int(round(seconds * self._fps))
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
                 else:
-                    self._cap.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000.0)
+                    self._cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, seconds * 1000.0))
                 ok, frame = self._cap.read()
                 img = self._frame_to_image(frame) if ok else None
-                self.position = self._cap_time() if ok else seconds
+                if not ok:
+                    # Retry once with MSEC (some files mishandle frame seeks)
+                    try:
+                        self._cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, seconds * 1000.0))
+                        ok, frame = self._cap.read()
+                        img = self._frame_to_image(frame) if ok else None
+                    except Exception:
+                        img = None
                 if emit:
                     self._emit_frame(
                         img or self._placeholder(f"No frame @ {seconds:.2f}s"),
-                        self.position,
+                        seconds,  # always the requested time for fade math
                     )
                 return
 
@@ -690,18 +707,20 @@ class MediaSession:
                                 pass
                     self._start_audio(start_at, end_at if end_at < 1e8 else None)
                     continue
-                # Natural end of selection/file — after full fade-out has played
-                self.position = min(end_at, self.duration) if self.duration > 0 else end_at
+                # Natural end — only after wall clock reaches Out (full fade played)
+                end_pos = min(end_at, self.duration) if self.duration > 0 else end_at
+                self.position = end_pos
                 try:
-                    if last_img is not None:
-                        self._emit_frame(last_img, self.position)
-                    else:
-                        self.seek(self.position, emit=True)
+                    # Final frame at exact Out (fade fully applied)
+                    if self._cap is not None:
+                        self.seek(end_pos, emit=True, stop_playback=False)
+                    elif last_img is not None:
+                        self._emit_frame(last_img, end_pos)
                 except Exception:
                     pass
                 break
 
-            # Playhead for UI + fade math = wall target (never runaway OpenCV time)
+            # Playhead for UI + fade math = wall target only
             self.position = target
 
             img = None
@@ -710,12 +729,15 @@ class MediaSession:
                     try:
                         import cv2
 
-                        # Advance decode toward target; do not trust cap time for UI
+                        # Track decoder with frame index toward target (ignore MSEC)
+                        want_idx = int(round(target * fps))
                         guard = 0
-                        while guard < 120:
-                            cap_t = self._cap_time()
-                            # If decoder is ahead of master clock, stop reading
-                            if cap_t >= target - (0.75 / fps):
+                        while guard < 150:
+                            try:
+                                cur_idx = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+                            except Exception:
+                                cur_idx = want_idx
+                            if cur_idx >= want_idx:
                                 break
                             ok, frame = self._cap.read()
                             guard += 1
@@ -723,13 +745,15 @@ class MediaSession:
                                 break
                             img = self._frame_to_image(frame)
                             last_img = img
-                        if img is None and last_img is None:
-                            ok, frame = self._cap.read()
-                            if ok:
-                                img = self._frame_to_image(frame)
-                                last_img = img
                         if img is None:
-                            img = last_img
+                            # Grab current / nearest frame without moving playhead time
+                            if last_img is None:
+                                ok, frame = self._cap.read()
+                                if ok:
+                                    img = self._frame_to_image(frame)
+                                    last_img = img
+                            else:
+                                img = last_img
                     except Exception:
                         img = last_img
                 else:
@@ -739,7 +763,7 @@ class MediaSession:
             now = time.perf_counter()
             min_emit_dt = 1.0 / min(fps * max(speed, 1.0), 60.0)
             if img is not None and (now - last_emit) >= min_emit_dt:
-                # Emit with wall-clock time so fade-out starts exactly N seconds before end
+                # Always paint looks using wall-clock source time
                 self._emit_frame(img, target)
                 last_emit = now
                 if self.on_position:
@@ -752,13 +776,11 @@ class MediaSession:
 
         self._stop_audio()
         self._playing = False
-        if gen == self._play_gen:
-            self._playing = False
-            if self.on_position:
-                try:
-                    self.on_position(self.position)
-                except Exception:
-                    pass
+        if gen == self._play_gen and self.on_position:
+            try:
+                self.on_position(self.position)
+            except Exception:
+                pass
 
     def current_preview_image(self) -> Image.Image | None:
         if self.info and self.info.kind == MediaKind.IMAGE and self._image:

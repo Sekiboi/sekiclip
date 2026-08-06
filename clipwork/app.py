@@ -985,10 +985,12 @@ class ClipworkApp(_CTkBase):
             frame = img.copy()
         except Exception:
             return
-        self.after(0, lambda i=frame, tt=t: self._show_frame(i, tt))
+        # Capture t by default arg so later events cannot clobber fade timing
+        self.after(0, lambda i=frame, tt=float(t): self._show_frame(i, tt))
 
     def _on_session_position(self, t: float) -> None:
-        self.after(0, lambda: self._sync_scrub(t))
+        tt = float(t)
+        self.after(0, lambda tpos=tt: self._sync_scrub(tpos))
 
     def _on_session_status(self, msg: str) -> None:
         self.after(0, lambda m=msg: self._set_status(m))
@@ -1371,14 +1373,44 @@ class ClipworkApp(_CTkBase):
         self._preview_resize_job = self.after(80, self._repaint_preview_from_cache)
 
     def _repaint_preview_from_cache(self) -> None:
+        """Re-apply looks on the last decoded frame at the current playhead."""
         self._preview_resize_job = None
         img = self._last_frame_img
+        t = float(self._session.position)
         if img is None:
+            # No cache yet — force a real decode
+            self._force_preview_at(t)
             return
         try:
-            self._show_frame(img, self._session.position)
+            self._show_frame(img, t)
         except Exception:
-            pass
+            self._force_preview_at(t)
+
+    def _force_preview_at(self, t: float) -> None:
+        """Decode + paint at exact source time t (timeline interactions).
+
+        Always uses the requested time for fade math — never decoder MSEC.
+        """
+        if not self._session.info:
+            return
+        try:
+            t = max(0.0, float(t))
+            if self._session.duration > 0:
+                t = min(t, self._session.duration)
+            # Decode a fresh frame; do not stop if already stopped
+            self._session.seek(t, emit=True, stop_playback=bool(self._session.playing))
+            self._update_time_labels(self._session.position, self._session.duration)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._log(f"Preview refresh: {exc}")
+            except Exception:
+                pass
+            # Last resort: paint cache with correct t
+            if self._last_frame_img is not None:
+                try:
+                    self._show_frame(self._last_frame_img, t)
+                except Exception:
+                    pass
 
     def _on_right_pane_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if not hasattr(self, "_tools_hint"):
@@ -1540,23 +1572,26 @@ class ClipworkApp(_CTkBase):
             self.btn_play.configure(text="Pause")
 
     def _on_timeline_change(self, in_t: float, out_t: float, pos: float) -> None:
+        """In/Out/range drag — always refresh preview at the playhead."""
         self._session.in_point = in_t
         self._session.out_point = out_t
-        self._session.position = pos
         self._update_io_label()
         self._sync_time_fields()
-        # Fades are relative to In/Out — refresh so edges stay correct
-        self._repaint_preview_from_cache()
-        # If playing, rebuild audio window so fade length stays exact
-        if self._session.playing and not self._scrub_dragging:
-            self._sync_preview_audio()
-            try:
-                self._session.restart_audio_from_position()
-            except Exception:
-                pass
+        # Full decode at pos so fade boundaries and frame stay correct (no stale cache)
+        if not self._session.playing:
+            self._force_preview_at(pos)
+        else:
+            self._session.position = pos
+            self._repaint_preview_from_cache()
+            if not self._scrub_dragging:
+                self._sync_preview_audio()
+                try:
+                    self._session.restart_audio_from_position()
+                except Exception:
+                    pass
 
     def _on_timeline_seek(self, t: float) -> None:
-        """Scrub playhead (motion): show correct frame/looks; pause A/V until release."""
+        """Scrub playhead (click/drag): always show the frame at t with current looks."""
         self._scrub_dragging = True
         if self._session.playing:
             self._resume_after_scrub = True
@@ -1564,16 +1599,22 @@ class ClipworkApp(_CTkBase):
             self._scrub_loop = bool(getattr(self._session, "_loop_selection", False))
             self._session.stop()
             self.btn_play.configure(text="Play")
-        self._session.seek(t)
-        self._update_time_labels(self._session.position, self._session.duration)
-        # Frame + video fades/crop/logo at this time
-        self._repaint_preview_from_cache()
+        # Force decode + paint at exact t (fixes "stuck until double-click")
+        self._force_preview_at(t)
+        self.timeline.set_range(
+            self._session.in_point,
+            self._session.out_or_end or self._session.duration,
+            self._session.position,
+        )
 
     def _on_timeline_seek_end(self, t: float) -> None:
-        """Mouse-up on timeline: resume play from here with correct audio filters."""
-        self._session.seek(t)
-        self._update_time_labels(self._session.position, self._session.duration)
-        self._repaint_preview_from_cache()
+        """Mouse-up: finalize frame, optionally resume play with correct A/V."""
+        self._force_preview_at(t)
+        self.timeline.set_range(
+            self._session.in_point,
+            self._session.out_or_end or self._session.duration,
+            self._session.position,
+        )
         self._scrub_dragging = False
         if self._resume_after_scrub:
             self._resume_after_scrub = False

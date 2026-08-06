@@ -220,9 +220,11 @@ class RangeTimeline(tk.Canvas):
         self._drag = None
 
     def _double(self, event: tk.Event) -> None:  # type: ignore[type-arg]
-        # Double-click: set playhead and expand selection slightly around it
+        # Double-click: set playhead and force a full preview refresh
         t = self._x_to_t(event.x)
         self.pos = t
         self.redraw()
         if self.on_seek:
             self.on_seek(self.pos)
+        if self.on_seek_end:
+            self.on_seek_end(self.pos)
