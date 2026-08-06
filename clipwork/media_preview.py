@@ -21,6 +21,7 @@ from typing import Callable
 from PIL import Image, ImageDraw
 
 from clipwork.media_ops.ffmpeg_util import find_ffmpeg, probe, require_ffmpeg
+from clipwork.preview_match import atempo_chain
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".mpeg", ".mpg", ".ts", ".mts"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus"}
@@ -166,11 +167,14 @@ class MediaSession:
         self.on_frame: Callable[[Image.Image | None, float], None] | None = None
         self.on_position: Callable[[float], None] | None = None
         self.on_status: Callable[[str], None] | None = None
-        # Live preview audio (matches Edit mute/volume/fades when set by the GUI)
+        # Live preview A/V looks (must match export render_cut settings)
         self.preview_volume: float = 1.0
         self.preview_mute: bool = False
         self.preview_audio_fade_in: float = 0.0
         self.preview_audio_fade_out: float = 0.0
+        self.preview_speed: float = 1.0
+        self._play_start_at: float = 0.0
+        self._play_end_at: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -516,12 +520,15 @@ class MediaSession:
                 pass
 
     def _preview_af_filters(self, start_seconds: float, end_seconds: float | None) -> str | None:
-        """Build ffplay -af chain: volume + afade matching export (relative to play window)."""
+        """Build ffplay -af chain matching export: volume, atempo, afade."""
         start = max(0.0, float(start_seconds))
+        speed = max(0.25, min(4.0, float(self.preview_speed)))
         if end_seconds is not None and end_seconds > start:
-            play_dur = float(end_seconds) - start
+            src_span = float(end_seconds) - start
         else:
-            play_dur = max(0.05, self.duration - start) if self.duration > 0 else 0.0
+            src_span = max(0.05, self.duration - start) if self.duration > 0 else 0.05
+        # After atempo, wall-clock duration of the played segment
+        play_dur = src_span / speed if speed > 1e-6 else src_span
         if play_dur <= 0:
             play_dur = 0.05
 
@@ -530,25 +537,34 @@ class MediaSession:
         if abs(vol - 1.0) > 1e-3 or self.preview_mute:
             parts.append(f"volume={vol:.4f}")
 
-        # Fades relative to In/Out when this play window covers those edges
+        parts.extend(atempo_chain(speed))
+
+        # Fades on *output* clock after tempo (same as export: afade after atempo)
         inn = float(self.in_point)
-        outp = float(self.out_or_end) if self.out_or_end > 0 else (start + play_dur)
+        outp = float(self.out_or_end) if self.out_or_end > 0 else (start + src_span)
         sel_dur = max(0.05, outp - inn)
+        out_sel = sel_dur / speed if speed > 1e-6 else sel_dur
+        max_each = max(0.05, out_sel * 0.49)
         afi = max(0.0, float(self.preview_audio_fade_in))
         afo = max(0.0, float(self.preview_audio_fade_out))
 
-        # Timeline after -ss starts at 0 for the played segment
+        # Map play window onto output selection clock when playing from In
         if afi > 0 and start <= inn + 0.05:
-            d = min(afi, sel_dur * 0.49, play_dur * 0.49)
-            st = max(0.0, inn - start)  # usually 0 when playing from In
+            d = min(afi, max_each, play_dur * 0.49)
             if d > 0.01:
-                parts.append(f"afade=t=in:st={st:.4f}:d={d:.4f}:curve=exp")
+                parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=exp")
 
         if afo > 0 and (end_seconds is None or end_seconds >= outp - 0.05):
-            d = min(afo, sel_dur * 0.49, play_dur * 0.49)
-            # Source time of fade start → offset within this play segment
-            fade_src = outp - d
-            st = fade_src - start
+            d = min(afo, max_each, play_dur * 0.49)
+            # When play starts at `start`, output t=0 is source `start`.
+            # Fade on export is on selection output: st = out_sel - d.
+            # Within this play segment (from selection start): st = out_sel - d - (start-inn)/speed
+            if start <= inn + 0.05:
+                st = max(0.0, out_sel - d)
+            else:
+                # Mid-selection play: source fade at outp-d → play offset
+                fade_src = outp - min(afo, sel_dur * 0.49)
+                st = (fade_src - start) / speed if speed > 1e-6 else (fade_src - start)
             if d > 0.01 and st < play_dur - 0.01:
                 parts.append(f"afade=t=out:st={max(0.0, st):.4f}:d={d:.4f}:curve=exp")
 
@@ -562,6 +578,7 @@ class MediaSession:
         if not ffplay:
             return False
         self._stop_audio()
+        start = max(0.0, float(start_seconds))
         # -ss before -i: fast seek for preview
         cmd: list[str] = [
             str(ffplay),
@@ -570,17 +587,16 @@ class MediaSession:
             "-loglevel",
             "error",
             "-ss",
-            f"{max(0.0, float(start_seconds)):.3f}",
+            f"{start:.3f}",
         ]
-        if end_seconds is not None and end_seconds > start_seconds:
-            cmd.extend(["-t", f"{(end_seconds - start_seconds):.3f}"])
+        if end_seconds is not None and end_seconds > start:
+            # Source duration to pull; atempo shortens wall clock
+            cmd.extend(["-t", f"{(float(end_seconds) - start):.3f}"])
         cmd.extend(["-i", str(self.path), "-vn"])
-        # Match Edit mute / volume / audio fades (what you hear ≈ export)
-        af = self._preview_af_filters(start_seconds, end_seconds)
+        af = self._preview_af_filters(start, end_seconds)
         if af:
             cmd.extend(["-af", af])
         try:
-            # DETACHED / no console window on Windows
             creation = 0
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
                 creation = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
@@ -596,14 +612,26 @@ class MediaSession:
             self._ffplay_proc = None
             return False
 
+    def restart_audio_from_position(self) -> None:
+        """Re-apply current volume/fade/speed filters from the playhead (live look changes)."""
+        if not self._playing or not self.path:
+            return
+        end = self._play_end_at if self._play_end_at > self.position else self.out_or_end
+        if end <= self.position + 0.05:
+            end = self.out_or_end if self.out_or_end > self.position else self.duration
+        self._start_audio(self.position, end if end < 1e8 else None)
+
     def _play_loop(self, gen: int, start_at: float, end_at: float) -> None:
-        """Clock-driven playback: sequential video frames + synced audio."""
+        """Clock-driven playback: sequential video frames + synced audio (respects speed)."""
+        self._play_start_at = start_at
+        self._play_end_at = end_at
         audio_ok = self._start_audio(start_at, end_at if end_at < 1e8 else None)
         if not audio_ok and self.info and self.info.has_audio:
             self._status("Playing without sound (ffplay not found — use a full ffmpeg build)")
 
         wall0 = time.perf_counter()
         fps = max(self._fps, 1.0)
+        speed = max(0.25, min(4.0, float(self.preview_speed)))
         # Resync capture to start
         with self._lock:
             if self._cap is not None:
@@ -616,16 +644,19 @@ class MediaSession:
                     pass
 
         last_emit = 0.0
-        min_emit_dt = 1.0 / min(fps, 60.0)  # up to 60 UI paints/sec
+        min_emit_dt = 1.0 / min(fps * max(speed, 1.0), 60.0)
 
         while self._playing and gen == self._play_gen:
-            elapsed = time.perf_counter() - wall0
+            # Re-read speed so live UI changes apply (matches export)
+            speed = max(0.25, min(4.0, float(self.preview_speed)))
+            elapsed = (time.perf_counter() - wall0) * speed
             target = start_at + elapsed
             if target >= end_at:
                 if self._loop_selection and gen == self._play_gen:
-                    # Restart selection loop
                     start_at = self.in_point
                     end_at = self.out_or_end if self.out_or_end > 0 else self.duration
+                    self._play_start_at = start_at
+                    self._play_end_at = end_at
                     wall0 = time.perf_counter()
                     self.seek(start_at, emit=False)
                     self._start_audio(start_at, end_at if end_at < 1e8 else None)

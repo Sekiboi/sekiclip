@@ -24,6 +24,7 @@ from clipwork.media_ops.ffmpeg_util import (
     request_cancel,
     staging_path,
 )
+from clipwork.preview_match import active_subs, fade_strength, load_srt_cached
 from clipwork.media_preview import (
     MediaSession,
     format_time,
@@ -589,7 +590,8 @@ class ClipworkApp(_CTkBase):
         fr = self._panels["Edit"]
         ctk.CTkLabel(
             fr,
-            text="Preview updates live — what you see is what you export.\n"
+            text="Live preview = export look\n"
+            "(fades, volume, speed, crop, logo, subs).\n"
             "Timeline In/Out set the cut range.",
             wraplength=260,
             justify="left",
@@ -1009,6 +1011,44 @@ class ClipworkApp(_CTkBase):
             "max_mb": self.var_max_mb.get(),
         }
 
+    def _export_look(self) -> dict[str, Any]:
+        """Canonical look for BOTH preview and export (In/Out + Edit controls)."""
+        a = self._live_settings()
+        vfi, vfo, afi, afo = self._fade_seconds()
+        try:
+            speed = max(0.25, min(4.0, float(a.get("speed") or 1.0)))
+        except (TypeError, ValueError):
+            speed = 1.0
+        try:
+            volume = max(0.0, float(a.get("volume") or 1.0))
+        except (TypeError, ValueError):
+            volume = 1.0
+        mute = bool(a.get("mute"))
+        act = str(a.get("edit_action") or "render_cut")
+        return {
+            "start": float(self._session.in_point),
+            "end": float(self._session.out_or_end or 0) or None,
+            "video_fade_in": vfi,
+            "video_fade_out": vfo,
+            "audio_fade_in": afi,
+            "audio_fade_out": afo,
+            "speed": speed,
+            "volume": 0.0 if mute else volume,
+            "mute": mute,
+            "use_crop": bool(a.get("use_crop")) or self._crop_mode,
+            "crop_rect": tuple(self._crop_rect),
+            "use_logo": bool(a.get("use_logo")) and bool(a.get("logo_path")),
+            "logo_path": a.get("logo_path"),
+            "logo_pos": str(a.get("logo_pos") or "top-right"),
+            "logo_scale": float(a.get("logo_scale") or 0.15),
+            "logo_opacity": 0.9,
+            "use_subs": bool(a.get("use_subs")) and bool(a.get("srt_path")),
+            "srt_path": a.get("srt_path"),
+            "flip_h": act == "flip",
+            "edit_action": act,
+            "cut_quality": str(a.get("cut_quality") or "high"),
+        }
+
     def _reset_edit_looks(self) -> None:
         """Reset fades/volume/crop/logo toggles to defaults (keeps timeline In/Out)."""
         self._suppress_preview_trace = True
@@ -1049,21 +1089,17 @@ class ClipworkApp(_CTkBase):
         self._log("Reset edit looks to defaults.")
 
     def _sync_preview_audio(self) -> None:
-        """Preview play uses the same mute/volume/audio fades as export."""
-        try:
-            mute = bool(self.var_mute.get())
-            vol = float(self.var_volume.get() or 1.0)
-        except Exception:
-            mute, vol = False, 1.0
-        self._session.preview_mute = mute
-        self._session.preview_volume = max(0.0, min(4.0, vol))
-        # Audio fades (seconds) — applied by ffplay during Play / Play sel.
-        _vfi, _vfo, afi, afo = self._fade_seconds()
-        self._session.preview_audio_fade_in = afi
-        self._session.preview_audio_fade_out = afo
+        """Push export-matched mute/volume/fades/speed into the session for play."""
+        look = self._export_look()
+        self._session.preview_mute = bool(look["mute"])
+        self._session.preview_volume = float(look["volume"]) if not look["mute"] else 0.0
+        # When mute, volume is 0 in export; keep fade amounts for when unmuted
+        self._session.preview_audio_fade_in = float(look["audio_fade_in"])
+        self._session.preview_audio_fade_out = float(look["audio_fade_out"])
+        self._session.preview_speed = float(look["speed"])
 
     def _bind_preview_traces(self) -> None:
-        """Any look change updates the preview immediately (WYSIWYG)."""
+        """Any look change updates the preview immediately (WYSIWYG = export)."""
         for name in (
             "var_fade_video",
             "var_fade_audio",
@@ -1091,68 +1127,88 @@ class ClipworkApp(_CTkBase):
                     pass
 
     def _on_edit_setting_changed(self) -> None:
-        """Live: sync audio + refresh preview (debounced)."""
+        """Live: sync play filters + refresh video (debounced)."""
         if self._suppress_preview_trace:
             return
         self._sync_preview_audio()
+        # Re-apply audio filters if currently playing (volume/fade/speed)
+        try:
+            if self._session.playing:
+                self._session.restart_audio_from_position()
+        except Exception:
+            pass
         if self._preview_resize_job is not None:
             try:
                 self.after_cancel(self._preview_resize_job)
             except Exception:
                 pass
-        # Short debounce so typing fade seconds doesn't thrash paint
         self._preview_resize_job = self.after(40, self._repaint_preview_from_cache)
 
     def _draw_overlays(self, fitted: Image.Image, t: float | None = None) -> Image.Image:
-        """Live export-faithful preview from current UI settings."""
+        """Apply the same look export will use (crop, flip, logo, fades, subs)."""
         from PIL import ImageDraw
 
-        a = self._live_settings()
+        look = self._export_look()
         img = fitted.convert("RGBA")
         w, h = img.size
         if t is None:
             t = float(self._session.position)
 
-        act = str(a.get("edit_action") or "")
-        if act == "flip":
+        # Flip (export flip_h when action is flip)
+        if look.get("flip_h"):
             try:
                 img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             except Exception:
                 pass
 
-        d = ImageDraw.Draw(img, "RGBA")
-        inn = float(self._session.in_point)
-        outp = float(self._session.out_or_end or self._session.duration or 0)
+        inn = float(look["start"])
+        outp = float(look["end"] or self._session.duration or 0)
+        if outp <= inn:
+            outp = inn + 0.05
         sel_dur = max(0.05, outp - inn)
         t_rel = t - inn
         outside = t < inn - 1e-3 or t > outp + 1e-3
 
-        use_crop = bool(a.get("use_crop")) or self._crop_mode
+        # Crop: export crops; preview zooms crop to stage (or handles while adjusting)
+        use_crop = bool(look.get("use_crop"))
         if use_crop:
-            l, top, r, b = self._crop_rect
-            x0, y0, x1, y1 = int(l * w), int(top * h), int(r * w), int(b * h)
-            d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 140))
-            d.rectangle([0, y1, w, h], fill=(0, 0, 0, 140))
-            d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 140))
-            d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 140))
-            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94, 255), width=2)
+            l, top, r, b = look["crop_rect"]  # type: ignore[misc]
+            x0, y0 = int(l * w), int(top * h)
+            x1, y1 = max(x0 + 2, int(r * w)), max(y0 + 2, int(b * h))
             if self._crop_mode:
+                d = ImageDraw.Draw(img, "RGBA")
+                d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 140))
+                d.rectangle([0, y1, w, h], fill=(0, 0, 0, 140))
+                d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 140))
+                d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 140))
+                d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94, 255), width=2)
                 for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
                     d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=(34, 197, 94, 255))
+            else:
+                # True crop fill — matches export composition
+                try:
+                    cropped = img.crop((x0, y0, x1, y1))
+                    stage = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+                    cropped.thumbnail((w, h), Image.Resampling.LANCZOS)
+                    px = (w - cropped.width) // 2
+                    py = (h - cropped.height) // 2
+                    stage.paste(cropped, (px, py), cropped if cropped.mode == "RGBA" else None)
+                    img = stage
+                except Exception:
+                    pass
 
-        use_logo = bool(a.get("use_logo")) or bool(a.get("logo_ghost"))
-        logo_path = a.get("logo_path")
-        if use_logo and logo_path and Path(str(logo_path)).is_file():
+        # Logo (export opacity 0.9)
+        if look.get("use_logo") and look.get("logo_path"):
             try:
-                logo = Image.open(str(logo_path)).convert("RGBA")
-                sc = float(a.get("logo_scale") or 0.15)
+                logo = Image.open(str(look["logo_path"])).convert("RGBA")
+                sc = float(look.get("logo_scale") or 0.15)
                 lw = max(8, int(w * sc))
                 lh = max(8, int(logo.height * (lw / max(1, logo.width))))
                 logo = logo.resize((lw, lh), Image.Resampling.LANCZOS)
-                op = 0.7 if a.get("logo_ghost") and not a.get("use_logo") else 0.9
+                op = float(look.get("logo_opacity") or 0.9)
                 alpha = logo.split()[-1].point(lambda p: int(p * op))
                 logo.putalpha(alpha)
-                pos = str(a.get("logo_pos") or "top-right").lower()
+                pos = str(look.get("logo_pos") or "top-right").lower()
                 if pos == "top-left":
                     xy = (12, 12)
                 elif pos == "bottom-left":
@@ -1166,72 +1222,88 @@ class ClipworkApp(_CTkBase):
                 img.paste(logo, xy, logo)
             except Exception:
                 pass
+        elif self._logo_ghost and self._logo_path and self._logo_path.is_file():
+            # Ghost only for placement (not export) — light preview
+            try:
+                logo = Image.open(str(self._logo_path)).convert("RGBA")
+                sc = float(self.var_logo_scale.get() or 0.15)
+                lw = max(8, int(w * sc))
+                lh = max(8, int(logo.height * (lw / max(1, logo.width))))
+                logo = logo.resize((lw, lh), Image.Resampling.LANCZOS)
+                alpha = logo.split()[-1].point(lambda p: int(p * 0.45))
+                logo.putalpha(alpha)
+                img.paste(logo, (w - lw - 12, 12), logo)
+            except Exception:
+                pass
 
-        # Video fade relative to In/Out (matches export). Use RGB blend — reliable on all Pillow builds.
-        vfi = vfo = 0.0
-        try:
-            if a.get("fade_video"):
-                vfi = max(0.0, float(a.get("v_fade_in") or 0))
-                vfo = max(0.0, float(a.get("v_fade_out") or 0))
-        except Exception:
-            pass
-        # Clamp fade lengths so short selections still show a ramp
-        vfi_c = min(vfi, sel_dur * 0.49) if vfi > 0 else 0.0
-        vfo_c = min(vfo, sel_dur * 0.49) if vfo > 0 else 0.0
-        fade_strength = 0.0  # 0 = full picture, 1 = full black
-        if not outside and (vfi_c > 0 or vfo_c > 0):
-            if vfi_c > 0 and t_rel < vfi_c:
-                fade_strength = max(
-                    fade_strength, 1.0 - max(0.0, min(1.0, t_rel / max(vfi_c, 1e-6)))
-                )
-            if vfo_c > 0 and t_rel > sel_dur - vfo_c:
-                into = t_rel - (sel_dur - vfo_c)
-                fade_strength = max(
-                    fade_strength, max(0.0, min(1.0, into / max(vfo_c, 1e-6)))
-                )
-        if fade_strength > 0.001:
+        # Burn-in subtitles at source time t (export burns relative to cut; show active cue)
+        if look.get("use_subs") and look.get("srt_path"):
+            try:
+                cues = load_srt_cached(look["srt_path"])
+                text = active_subs(cues, t)
+                if text:
+                    d = ImageDraw.Draw(img, "RGBA")
+                    # Bottom-center multi-line with dark outline
+                    lines = text.split("\n")[:4]
+                    y = h - 28 - 18 * len(lines)
+                    for line in lines:
+                        # crude center
+                        tw = min(w - 20, 8 * len(line))
+                        x = max(10, (w - tw) // 2)
+                        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)):
+                            fill = (0, 0, 0, 220) if ox or oy else (255, 255, 240, 255)
+                            d.text((x + ox, y + oy), line, fill=fill)
+                        y += 18
+            except Exception:
+                pass
+
+        # Video fades (same clamp math as export)
+        vfi = float(look["video_fade_in"])
+        vfo = float(look["video_fade_out"])
+        strength = 0.0
+        if not outside:
+            strength = fade_strength(t_rel, sel_dur, vfi, vfo)
+        if strength > 0.001:
             rgb = img.convert("RGB")
             black = Image.new("RGB", (w, h), (0, 0, 0))
-            rgb = Image.blend(rgb, black, min(1.0, fade_strength))
+            rgb = Image.blend(rgb, black, min(1.0, strength))
             img = rgb.convert("RGBA")
-            d = ImageDraw.Draw(img, "RGBA")
 
         if outside and self._session.info and self._session.duration > 0:
             rgb = img.convert("RGB")
             black = Image.new("RGB", (w, h), (0, 0, 0))
             rgb = Image.blend(rgb, black, 0.55)
             img = rgb.convert("RGBA")
-            d = ImageDraw.Draw(img, "RGBA")
 
+        # Status badges (honest about what export will do)
+        d = ImageDraw.Draw(img, "RGBA")
         badges: list[str] = []
         try:
             if outside and self._session.info:
                 badges.append("OUTSIDE SEL")
-            if a.get("mute"):
+            if look.get("mute"):
                 badges.append("MUTE")
             else:
-                vol = float(a.get("volume") or 1.0)
+                vol = float(look.get("volume") or 1.0)
                 if abs(vol - 1.0) > 0.02:
                     badges.append(f"VOL {int(vol * 100)}%")
-            sp = float(a.get("speed") or 1.0)
+            sp = float(look.get("speed") or 1.0)
             if abs(sp - 1.0) > 0.02:
                 badges.append(f"{sp:g}×")
-            if a.get("fade_audio"):
-                afi = float(a.get("a_fade_in") or 0)
-                afo = float(a.get("a_fade_out") or 0)
-                if afi > 0 or afo > 0:
-                    badges.append(f"A-fade {afi:g}/{afo:g}s")
+            afi, afo = float(look["audio_fade_in"]), float(look["audio_fade_out"])
+            if afi > 0 or afo > 0:
+                badges.append(f"A-fade {afi:g}/{afo:g}s")
             if vfi > 0 or vfo > 0:
                 badges.append(f"V-fade {vfi:g}/{vfo:g}s")
-            if fade_strength > 0.05 and not outside:
+            if strength > 0.05 and not outside:
                 badges.append("FADING")
-            if a.get("use_subs") and a.get("srt_path"):
+            if look.get("use_subs"):
                 badges.append("SUBS")
-            if a.get("use_crop") or self._crop_mode:
+            if look.get("use_crop"):
                 badges.append("CROP")
-            if a.get("use_logo") and a.get("logo_path"):
+            if look.get("use_logo"):
                 badges.append("LOGO")
-            if act == "flip":
+            if look.get("flip_h"):
                 badges.append("FLIP H")
         except Exception:
             pass
@@ -2532,8 +2604,23 @@ class ClipworkApp(_CTkBase):
             reenc = bool(self.var_reencode.get())
             out_path = dest
             suffix = dest.suffix or src.suffix or ".mp4"
-            vfi, vfo, afi, afo = self._fade_seconds()
-            has_fades = (vfi > 0 or vfo > 0 or afi > 0 or afo > 0) and suffix.lower() not in (
+            look = self._export_look()
+            vfi = look["video_fade_in"]
+            vfo = look["video_fade_out"]
+            afi = look["audio_fade_in"]
+            afo = look["audio_fade_out"]
+            has_fx = (
+                vfi > 0
+                or vfo > 0
+                or afi > 0
+                or afo > 0
+                or look.get("use_crop")
+                or look.get("use_logo")
+                or look.get("use_subs")
+                or abs(float(look["speed"]) - 1.0) > 1e-3
+                or look.get("mute")
+                or abs(float(self.var_volume.get() or 1.0) - 1.0) > 1e-3
+            ) and suffix.lower() not in (
                 ".mp3",
                 ".wav",
                 ".flac",
@@ -2541,26 +2628,52 @@ class ClipworkApp(_CTkBase):
                 ".ogg",
                 ".aac",
             )
-            # Fades require a re-encode — use one-pass cut so Trim matches the preview
-            if has_fades:
+            # Any Edit look requires re-encode so Trim matches the preview
+            if has_fx:
                 note(
-                    f"  Trim + fades (video {vfi:.2f}/{vfo:.2f}s · audio {afi:.2f}/{afo:.2f}s)"
+                    f"  Trim + looks (video fade {vfi:.2f}/{vfo:.2f}s · "
+                    f"audio {afi:.2f}/{afo:.2f}s · speed {look['speed']:g}×)"
                 )
                 note(
                     f"  Cutting {format_time(start)} → {format_time(end or 0)}"
                     + (f" ({format_time(dur)})" if dur else "")
                 )
-                prog(0.03, "Trim: encoding with fades…")
+                prog(0.03, "Trim: encoding with looks…")
+                cx = cy = 0
+                cw = ch = None
+                if look.get("use_crop"):
+                    cx, cy, cw, ch = self._crop_pixels(src)
+                logo = (
+                    Path(str(look["logo_path"]))
+                    if look.get("use_logo") and look.get("logo_path")
+                    else None
+                )
+                srt = (
+                    Path(str(look["srt_path"]))
+                    if look.get("use_subs") and look.get("srt_path")
+                    else None
+                )
                 try:
                     out = ops.render_cut(
                         src,
                         out_path,
                         start=start,
                         end=end if end else None,
+                        crop_x=cx,
+                        crop_y=cy,
+                        crop_w=cw,
+                        crop_h=ch,
+                        speed=float(look["speed"]),
+                        volume=float(self.var_volume.get() or 1.0),
+                        mute=bool(look["mute"]),
                         video_fade_in=vfi,
                         video_fade_out=vfo,
                         audio_fade_in=afi,
                         audio_fade_out=afo,
+                        logo=logo,
+                        logo_position=str(look.get("logo_pos") or "top-right"),
+                        logo_scale=float(look.get("logo_scale") or 0.15),
+                        srt=srt,
                         crf=23,
                         preset="veryfast",
                         on_progress=prog,
@@ -2692,31 +2805,34 @@ class ClipworkApp(_CTkBase):
             )
 
         if tool == "Edit":
-            a = self._live_settings()
-            act = str(a.get("edit_action") or "render_cut")
+            look = self._export_look()
+            act = str(look.get("edit_action") or "render_cut")
             if act in ("render_cut", "fade"):
-                start = self._session.in_point
-                end = self._session.out_or_end
-                vfi, vfo, afi, afo = self._fade_seconds()
+                start = look["start"]
+                end = look["end"]
+                vfi = look["video_fade_in"]
+                vfo = look["video_fade_out"]
+                afi = look["audio_fade_in"]
+                afo = look["audio_fade_out"]
                 crf, preset = self._cut_quality_params()
-                vol = float(a.get("volume") or 1.0)
-                mute = bool(a.get("mute"))
-                speed = float(a.get("speed") or 1.0)
+                vol = float(self.var_volume.get() or 1.0)
+                mute = bool(look["mute"])
+                speed = float(look["speed"])
                 cx, cy, cw, ch = (0, 0, None, None)
                 logo = None
                 srt = None
                 if act == "render_cut":
-                    if a.get("use_crop") or self._crop_mode:
+                    if look.get("use_crop"):
                         cx, cy, cw, ch = self._crop_pixels(src)
-                    if a.get("use_logo") and a.get("logo_path"):
-                        logo = Path(str(a["logo_path"]))
-                    if a.get("use_subs") and a.get("srt_path"):
-                        srt = Path(str(a["srt_path"]))
+                    if look.get("use_logo") and look.get("logo_path"):
+                        logo = Path(str(look["logo_path"]))
+                    if look.get("use_subs") and look.get("srt_path"):
+                        srt = Path(str(look["srt_path"]))
                 sel = f"{format_time(start)} → {format_time(end or 0)}"
                 note(f"  One-pass {'render cut' if act == 'render_cut' else 'fade'}: {sel}")
                 note(
                     f"  Fades video {vfi:.2f}/{vfo:.2f}s · audio {afi:.2f}/{afo:.2f}s"
-                    f" · quality={a.get('cut_quality') or 'high'}"
+                    f" · quality={look.get('cut_quality') or 'high'}"
                 )
                 if act == "render_cut":
                     bits = []
@@ -2732,6 +2848,8 @@ class ClipworkApp(_CTkBase):
                         bits.append("logo")
                     if srt:
                         bits.append("subs")
+                    if look.get("flip_h"):
+                        bits.append("flip")
                     if bits:
                         note(f"  Options: {', '.join(bits)}")
                 prog(0.03, f"{act}: encoding…")
@@ -2746,6 +2864,7 @@ class ClipworkApp(_CTkBase):
                             crop_y=cy,
                             crop_w=cw,
                             crop_h=ch,
+                            flip_h=bool(look.get("flip_h")),
                             speed=speed,
                             volume=vol,
                             mute=mute,
@@ -2754,8 +2873,9 @@ class ClipworkApp(_CTkBase):
                             audio_fade_in=afi,
                             audio_fade_out=afo,
                             logo=logo,
-                            logo_position=str(a.get("logo_pos") or "top-right"),
-                            logo_scale=float(a.get("logo_scale") or 0.15),
+                            logo_position=str(look.get("logo_pos") or "top-right"),
+                            logo_scale=float(look.get("logo_scale") or 0.15),
+                            logo_opacity=float(look.get("logo_opacity") or 0.9),
                             srt=srt,
                             crf=crf,
                             preset=preset,
