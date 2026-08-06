@@ -308,7 +308,7 @@ def media_summary(path: Path | str) -> str:
 
 
 def unique_path(path: Path) -> Path:
-    """Never overwrite: add _1, _2, …"""
+    """Never overwrite: add _1, _2, … (auto-generated names only)."""
     path = Path(path)
     if not path.exists():
         return path
@@ -325,3 +325,20 @@ def default_output(src: Path, suffix: str, tag: str = "") -> Path:
     src = Path(src)
     mid = f"_{tag}" if tag else ""
     return unique_path(src.with_name(f"{src.stem}{mid}{suffix}"))
+
+
+def output_path(
+    dest: Path | str | None,
+    src: Path | str,
+    *,
+    suffix: str,
+    tag: str = "",
+) -> Path:
+    """Resolve write path.
+
+    Explicit ``dest`` is used as-is so the user can replace an existing file.
+    When ``dest`` is omitted, invent a unique name next to the source.
+    """
+    if dest is not None and str(dest).strip():
+        return Path(dest)
+    return default_output(Path(src), suffix, tag)

@@ -5,9 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from clipwork.media_ops.ffmpeg_util import unique_path
-
-
 def batch_to_folder(
     sources: list[Path | str],
     out_dir: Path | str,
@@ -16,13 +13,17 @@ def batch_to_folder(
     run_one: Callable[[Path, Path], Path],
     suffix: str | None = None,
     name_tag: str = "out",
+    overwrite: bool = True,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Run run_one(src, dest) for each source.
     dest is out_dir / f"{stem}_{name_tag}{suffix or src.suffix}".
+    When overwrite is True (default), re-runs replace same-named outputs.
     Returns list of {src, dest, ok, error}.
     """
+    from clipwork.media_ops.ffmpeg_util import unique_path
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
@@ -39,8 +40,14 @@ def batch_to_folder(
         ext = suffix if suffix is not None else (src.suffix or ".mp4")
         if not ext.startswith("."):
             ext = f".{ext}"
-        dest = unique_path(out_dir / f"{src.stem}_{name_tag}{ext}")
+        candidate = out_dir / f"{src.stem}_{name_tag}{ext}"
+        dest = candidate if overwrite else unique_path(candidate)
         try:
+            if overwrite and dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
             got = run_one(src, dest)
             results.append(
                 {

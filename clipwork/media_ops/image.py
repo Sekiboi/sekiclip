@@ -29,10 +29,6 @@ def convert_image(
         fmt = "jpeg"
     ext = ".jpg" if fmt == "jpeg" else f".{fmt}"
     out = Path(dest) if dest else default_output(src, ext, "convert")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ext, "convert")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     if fmt == "jpeg" and img.mode in ("RGBA", "P"):
@@ -59,10 +55,6 @@ def resize_image(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, src.suffix, "resize")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, src.suffix or ".png", "resize")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     if max_edge:
@@ -94,10 +86,6 @@ def compress_image(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, ".jpg", "compress")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".jpg", "compress")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     if max_edge:
@@ -116,10 +104,6 @@ def rotate_image(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, src.suffix, f"rot{degrees}")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, src.suffix or ".png", f"rot{degrees}")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     # Pillow: expand so corners aren't clipped
@@ -139,10 +123,6 @@ def flip_image(
     src = Path(src)
     tag = "flip_h" if horizontal else "flip_v"
     out = Path(dest) if dest else default_output(src, src.suffix, tag)
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, src.suffix or ".png", tag)
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     img = ImageOps.mirror(img) if horizontal else ImageOps.flip(img)
@@ -163,10 +143,6 @@ def crop_image(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, src.suffix, "crop")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, src.suffix or ".png", "crop")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     img = img.crop((left, top, right, bottom))
@@ -179,10 +155,6 @@ def crop_image(
 def strip_exif(src: Path | str, dest: Path | str | None = None) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, src.suffix, "noexif")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, src.suffix or ".jpg", "noexif")
     out.parent.mkdir(parents=True, exist_ok=True)
     img = _open(src)
     clean = img.copy()
@@ -203,7 +175,7 @@ def images_to_pdf(
     paths = [Path(p) for p in sources]
     if not paths:
         raise ValueError("No images")
-    out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
+    out = Path(dest)
     out.parent.mkdir(parents=True, exist_ok=True)
     images: list[Image.Image] = []
     for p in paths:

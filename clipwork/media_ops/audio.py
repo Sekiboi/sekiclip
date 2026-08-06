@@ -20,10 +20,6 @@ def convert_audio(
     if fmt not in AUDIO_FORMATS:
         raise ValueError(f"Unsupported audio format: {fmt}")
     out = Path(dest) if dest else default_output(src, f".{fmt}", "convert")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, f".{fmt}", "convert")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "mp3":
@@ -49,10 +45,6 @@ def compress_audio(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, ".mp3", "compress")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp3", "compress")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
         ["-i", str(src), "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, str(out)]
@@ -67,10 +59,6 @@ def normalize_audio(
     """EBU R128 loudnorm (single pass — good enough, low upkeep)."""
     src = Path(src)
     out = Path(dest) if dest else default_output(src, ".mp3", "norm")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp3", "norm")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
         [
@@ -97,10 +85,6 @@ def to_mono(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, ".mp3", "mono")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp3", "mono")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
         [

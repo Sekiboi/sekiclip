@@ -446,6 +446,8 @@ class ClipworkApp(_CTkBase):
         self.tool_frame.pack(fill="both", expand=True, padx=4, pady=4)
         self._panels: dict[str, ctk.CTkFrame] = {}
         self._build_tool_panels()
+        self._bind_preview_traces()
+        self._sync_preview_audio()
 
         self.var_batch = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
@@ -729,6 +731,7 @@ class ClipworkApp(_CTkBase):
         if self._logo_path:
             parts.append(f"Logo: {self._logo_path.name}")
         self.edit_files_label.configure(text=" · ".join(parts) if parts else "No .srt / logo chosen")
+        self._on_edit_setting_changed()
 
     def _select_tool(self, name: str) -> None:
         """Switch active tool tab and highlight its pill button."""
@@ -954,34 +957,110 @@ class ClipworkApp(_CTkBase):
     def _on_session_status(self, msg: str) -> None:
         self.after(0, lambda m=msg: self._set_status(m))
 
-    def _draw_overlays(self, fitted: Image.Image) -> Image.Image:
-        """Crop rectangle and/or logo ghost on the letterboxed stage."""
+    def _sync_preview_audio(self) -> None:
+        """Push mute/volume into the session so play-through matches export."""
+        try:
+            mute = bool(self.var_mute.get())
+            vol = float(self.var_volume.get() or 1.0)
+        except Exception:
+            mute, vol = False, 1.0
+        self._session.preview_mute = mute
+        self._session.preview_volume = max(0.0, min(4.0, vol))
+
+    def _bind_preview_traces(self) -> None:
+        """When edit controls change, refresh the preview so export matches what you see."""
+        vars_to_watch: list[Any] = []
+        for name in (
+            "var_fade_video",
+            "var_fade_audio",
+            "var_v_fade_in",
+            "var_v_fade_out",
+            "var_a_fade_in",
+            "var_a_fade_out",
+            "var_mute",
+            "var_volume",
+            "var_speed",
+            "var_use_crop",
+            "var_use_logo",
+            "var_use_subs",
+            "var_logo_pos",
+            "var_logo_scale",
+            "var_edit_action",
+            "var_cut_quality",
+        ):
+            v = getattr(self, name, None)
+            if v is not None:
+                vars_to_watch.append(v)
+        for v in vars_to_watch:
+            try:
+                v.trace_add("write", lambda *_a: self._on_edit_setting_changed())
+            except Exception:
+                pass
+        # Volume slider already updates var_volume via _on_volume_slider
+
+    def _on_edit_setting_changed(self) -> None:
+        self._sync_preview_audio()
+        if self._preview_resize_job is not None:
+            try:
+                self.after_cancel(self._preview_resize_job)
+            except Exception:
+                pass
+        self._preview_resize_job = self.after(60, self._repaint_preview_from_cache)
+
+    def _draw_overlays(self, fitted: Image.Image, t: float | None = None) -> Image.Image:
+        """Render export-faithful preview: selection, fades, crop, logo, badges."""
         from PIL import ImageDraw
 
-        img = fitted.copy()
-        d = ImageDraw.Draw(img, "RGBA")
+        img = fitted.convert("RGBA")
         w, h = img.size
-        if self._crop_mode:
-            l, t, r, b = self._crop_rect
-            x0, y0, x1, y1 = int(l * w), int(t * h), int(r * w), int(b * h)
-            # dim outside
-            d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 120))
-            d.rectangle([0, y1, w, h], fill=(0, 0, 0, 120))
-            d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 120))
-            d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 120))
+        if t is None:
+            t = float(self._session.position)
+
+        # Horizontal flip when Flip action is selected
+        try:
+            act = (self.var_edit_action.get() if getattr(self, "var_edit_action", None) else "") or ""
+            if act == "flip":
+                img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        except Exception:
+            pass
+
+        d = ImageDraw.Draw(img, "RGBA")
+        inn = float(self._session.in_point)
+        outp = float(self._session.out_or_end or self._session.duration or 0)
+        sel_dur = max(0.05, outp - inn)
+        t_rel = t - inn
+        outside = t < inn - 1e-3 or t > outp + 1e-3
+
+        # ── Crop (export crop, or live edit handles) ──
+        show_crop = bool(getattr(self, "var_use_crop", None) and self.var_use_crop.get()) or self._crop_mode
+        if show_crop:
+            l, top, r, b = self._crop_rect
+            x0, y0, x1, y1 = int(l * w), int(top * h), int(r * w), int(b * h)
+            d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 140))
+            d.rectangle([0, y1, w, h], fill=(0, 0, 0, 140))
+            d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 140))
+            d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 140))
             d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94, 255), width=2)
-            # corner handles
-            for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-                d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=(34, 197, 94, 255))
-        if self._logo_ghost and self._logo_path and self._logo_path.is_file():
+            if self._crop_mode:
+                for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+                    d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=(34, 197, 94, 255))
+
+        # ── Logo (export or ghost) ──
+        use_logo = (
+            (getattr(self, "var_use_logo", None) and self.var_use_logo.get())
+            or self._logo_ghost
+        )
+        if use_logo and self._logo_path and self._logo_path.is_file():
             try:
                 logo = Image.open(self._logo_path).convert("RGBA")
                 sc = float(self.var_logo_scale.get() or 0.15)
                 lw = max(8, int(w * sc))
                 lh = max(8, int(logo.height * (lw / max(1, logo.width))))
                 logo = logo.resize((lw, lh), Image.Resampling.LANCZOS)
-                # fade
-                alpha = logo.split()[-1].point(lambda p: int(p * 0.7))
+                op = 0.7 if self._logo_ghost and not (
+                    getattr(self, "var_use_logo", None) and self.var_use_logo.get()
+                ) else 0.9
+                alpha = logo.split()[-1].point(lambda p: int(p * op))
                 logo.putalpha(alpha)
                 pos = (self.var_logo_pos.get() or "top-right").lower()
                 if pos == "top-left":
@@ -997,6 +1076,73 @@ class ClipworkApp(_CTkBase):
                 img.paste(logo, xy, logo)
             except Exception:
                 pass
+
+        # ── Video fade in/out (relative to In/Out, as export does) ──
+        vfi = vfo = 0.0
+        try:
+            if getattr(self, "var_fade_video", None) and self.var_fade_video.get():
+                vfi = max(0.0, float(self.var_v_fade_in.get() or 0))
+                vfo = max(0.0, float(self.var_v_fade_out.get() or 0))
+        except Exception:
+            pass
+        fade_alpha = 0
+        if not outside and (vfi > 0 or vfo > 0):
+            if vfi > 0 and t_rel < vfi:
+                fade_alpha = int(255 * (1.0 - max(0.0, min(1.0, t_rel / vfi))))
+            if vfo > 0 and t_rel > sel_dur - vfo:
+                into = t_rel - (sel_dur - vfo)
+                fade_alpha = max(
+                    fade_alpha, int(255 * max(0.0, min(1.0, into / max(vfo, 1e-6))))
+                )
+        if fade_alpha > 0:
+            d.rectangle([0, 0, w, h], fill=(0, 0, 0, fade_alpha))
+
+        # ── Outside In–Out selection: strong dim (not in the export) ──
+        if outside and self._session.info and self._session.duration > 0:
+            d.rectangle([0, 0, w, h], fill=(0, 0, 0, 150))
+
+        # ── Status badges ──
+        badges: list[str] = []
+        try:
+            if outside and self._session.info:
+                badges.append("OUTSIDE SEL")
+            if getattr(self, "var_mute", None) and self.var_mute.get():
+                badges.append("MUTE")
+            else:
+                vol = float(self.var_volume.get() or 1.0)
+                if abs(vol - 1.0) > 0.02:
+                    badges.append(f"VOL {int(vol * 100)}%")
+            sp = float(self.var_speed.get() or 1.0)
+            if abs(sp - 1.0) > 0.02:
+                badges.append(f"{sp:g}×")
+            if getattr(self, "var_fade_audio", None) and self.var_fade_audio.get():
+                afi = float(self.var_a_fade_in.get() or 0)
+                afo = float(self.var_a_fade_out.get() or 0)
+                if afi > 0 or afo > 0:
+                    badges.append(f"A-fade {afi:g}/{afo:g}s")
+            if vfi > 0 or vfo > 0:
+                badges.append(f"V-fade {vfi:g}/{vfo:g}s")
+            if getattr(self, "var_use_subs", None) and self.var_use_subs.get() and self._srt_path:
+                badges.append("SUBS")
+            if getattr(self, "var_use_crop", None) and self.var_use_crop.get():
+                badges.append("CROP")
+            if getattr(self, "var_use_logo", None) and self.var_use_logo.get() and self._logo_path:
+                badges.append("LOGO")
+            if act == "flip":
+                badges.append("FLIP H")
+        except Exception:
+            pass
+
+        if badges:
+            text = " · ".join(badges)
+            tw = min(w - 16, max(80, 8 + 7 * len(text)))
+            bh = 22
+            d.rectangle([6, h - bh - 6, 6 + tw, h - 6], fill=(0, 0, 0, 170))
+            try:
+                d.text((12, h - bh - 2), text, fill=(240, 240, 245, 255))
+            except Exception:
+                pass
+
         return img.convert("RGB")
 
     def _preview_stage(self) -> tuple[int, int]:
@@ -1135,7 +1281,7 @@ class ClipworkApp(_CTkBase):
             pass
 
     def _show_frame(self, img: Image.Image, t: float) -> None:
-        """Paint preview on the main thread only (letterboxed stage)."""
+        """Paint preview on the main thread only (letterboxed + export FX)."""
         try:
             try:
                 self._last_frame_img = img.copy()
@@ -1143,8 +1289,8 @@ class ClipworkApp(_CTkBase):
                 self._last_frame_img = img
             stage = self._preview_stage()
             fitted = _fit_image(img, stage)
-            if self._crop_mode or self._logo_ghost:
-                fitted = self._draw_overlays(fitted)
+            # Always apply export-preview overlays so the stage matches the cut
+            fitted = self._draw_overlays(fitted, t)
             w, h = stage
             try:
                 light = fitted
@@ -1291,12 +1437,14 @@ class ClipworkApp(_CTkBase):
             self._session.stop()
             self.btn_play.configure(text="Play")
         else:
+            self._sync_preview_audio()
             self._session.play()
             self.btn_play.configure(text="Pause")
 
     def _play_selection(self) -> None:
         if not self._session.info:
             return
+        self._sync_preview_audio()
         self._session.play_selection(loop=True)
         self.btn_play.configure(text="Pause")
         self._set_status("Playing selection (loop) — Stop to end")
@@ -1371,6 +1519,8 @@ class ClipworkApp(_CTkBase):
         self.var_volume.set(f"{float(value):.2f}")
         if hasattr(self, "volume_label"):
             self.volume_label.configure(text=f"{int(float(value) * 100)}%")
+        self._sync_preview_audio()
+        self._on_edit_setting_changed()
 
     def _cut_quality_params(self) -> tuple[int, str]:
         """Map UI quality label → (crf, x264 preset). High quality + efficient defaults."""
@@ -1425,20 +1575,22 @@ class ClipworkApp(_CTkBase):
     def _toggle_crop_mode(self) -> None:
         self._crop_mode = not self._crop_mode
         self._logo_ghost = False
+        if self._crop_mode and hasattr(self, "var_use_crop"):
+            self.var_use_crop.set(True)
         self._set_status(
             "Crop overlay ON — drag corners/edges on preview"
             if self._crop_mode
             else "Crop overlay off"
         )
-        if self._session.info:
-            self._session.seek(self._session.position)
+        self._on_edit_setting_changed()
 
     def _toggle_logo_ghost(self) -> None:
         self._logo_ghost = not self._logo_ghost
         self._crop_mode = False
+        if self._logo_ghost and hasattr(self, "var_use_logo"):
+            self.var_use_logo.set(True)
         self._set_status("Logo ghost ON" if self._logo_ghost else "Logo ghost off")
-        if self._session.info:
-            self._session.seek(self._session.position)
+        self._on_edit_setting_changed()
 
     def _crop_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if not self._crop_mode:
@@ -1495,9 +1647,8 @@ class ClipworkApp(_CTkBase):
         elif d == "new":
             r, b = max(nx, l + 0.05), max(ny, t + 0.05)
         self._crop_rect = (l, t, r, b)
-        if self._session.info:
-            # lightweight repaint: use last frame path by seek current (ok for drag)
-            self._session.seek(self._session.position)
+        # Repaint from cached frame (faster than re-decode while dragging)
+        self._repaint_preview_from_cache()
 
     def _crop_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
         self._crop_drag = None
@@ -1715,13 +1866,13 @@ class ClipworkApp(_CTkBase):
         return initial_dir, f"{stem}_export{src.suffix or '.mp4'}", video_ft + audio_ft + image_ft
 
     def _ask_save_path(self, tool: str, src: Path | None) -> Path | None:
-        """Show Save As dialog. Returns None if cancelled."""
+        """Show Save As dialog. Existing files may be replaced (OS confirms on Windows)."""
         initial_dir, name, filetypes = self._export_defaults(tool, src)
         # Default extension from suggested name
         def_ext = Path(name).suffix or ".mp4"
         path_str = filedialog.asksaveasfilename(
             parent=self,
-            title="Save exported file as…",
+            title="Save exported file as… (existing file will be replaced)",
             initialdir=initial_dir,
             initialfile=name,
             defaultextension=def_ext,
@@ -1736,6 +1887,26 @@ class ClipworkApp(_CTkBase):
         except OSError as exc:
             messagebox.showerror(__app_name__, f"Cannot create folder:\n{exc}")
             return None
+        # Extra confirm when replacing (covers platforms that skip OS prompt)
+        if dest.is_file():
+            if not messagebox.askyesno(
+                __app_name__,
+                f"Replace existing file?\n\n{dest.name}\n\nThis cannot be undone.",
+                icon="warning",
+            ):
+                return None
+        # Never overwrite the open source in-place (ffmpeg can't safely read+write same path)
+        if src is not None:
+            try:
+                if dest.resolve() == Path(src).resolve():
+                    messagebox.showerror(
+                        __app_name__,
+                        "Cannot overwrite the file you currently have open.\n"
+                        "Save under a new name, then replace the original if you want.",
+                    )
+                    return None
+            except OSError:
+                pass
         self._remember_output_dir(dest)
         return dest
 

@@ -38,10 +38,7 @@ def convert_video(
     fmt = fmt.lower().lstrip(".")
     if fmt not in VIDEO_FORMATS:
         raise ValueError(f"Unsupported video format: {fmt}. Choose from {VIDEO_FORMATS}")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, f".{fmt}", "convert")
+    out = Path(dest) if dest else default_output(src, f".{fmt}", "convert")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "webm":
@@ -114,10 +111,6 @@ def compress_video(
         raise ValueError(f"Unknown preset {preset}; use {tuple(COMPRESS_PRESETS)}")
     cfg = COMPRESS_PRESETS[preset]
     out = Path(dest) if dest else default_output(src, src.suffix or ".mp4", f"compress_{preset}")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp4", f"compress_{preset}")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     use_gpu = bool(cfg.get("gpu"))
@@ -170,10 +163,6 @@ def trim_media(
     src = Path(src)
     suffix = src.suffix or ".mp4"
     out = Path(dest) if dest else default_output(src, suffix, "trim")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, suffix, "trim")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     args: list[str] = ["-ss", str(start), "-i", str(src)]
@@ -211,10 +200,6 @@ def extract_audio(
     src = Path(src)
     fmt = fmt.lower().lstrip(".")
     out = Path(dest) if dest else default_output(src, f".{fmt}", "audio")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, f".{fmt}", "audio")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "mp3":
@@ -244,10 +229,6 @@ def remux(
     src = Path(src)
     fmt = fmt.lower().lstrip(".")
     out = Path(dest) if dest else default_output(src, f".{fmt}", "remux")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, f".{fmt}", "remux")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(["-i", str(src), "-c", "copy", str(out)])
     return out
@@ -264,10 +245,6 @@ def rotate_video(
     if degrees not in (90, 180, 270):
         raise ValueError("degrees must be 90, 180, or 270")
     out = Path(dest) if dest else default_output(src, src.suffix or ".mp4", f"rot{degrees}")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp4", f"rot{degrees}")
     out.parent.mkdir(parents=True, exist_ok=True)
     # transpose: 1=90CW, 2=90CCW, for 180 use two transpose or rotate filter
     if degrees == 90:
@@ -297,10 +274,6 @@ def rotate_video(
 def strip_audio(src: Path | str, dest: Path | str | None = None) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, src.suffix or ".mp4", "silent")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".mp4", "silent")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(["-i", str(src), "-c:v", "copy", "-an", str(out)])
     return out
@@ -314,10 +287,6 @@ def grab_frame(
 ) -> Path:
     src = Path(src)
     out = Path(dest) if dest else default_output(src, ".jpg", "frame")
-    if dest:
-        out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
-    else:
-        out = default_output(src, ".jpg", "frame")
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
         ["-ss", str(time), "-i", str(src), "-frames:v", "1", "-q:v", "2", str(out)]
@@ -335,7 +304,7 @@ def concat_videos(
     paths = [Path(p) for p in sources]
     if len(paths) < 2:
         raise ValueError("Need at least two files to concatenate")
-    out = unique_path(Path(dest)) if Path(dest).exists() else Path(dest)
+    out = Path(dest)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if reencode:

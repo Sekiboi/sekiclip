@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from clipwork.media_ops.ffmpeg_util import (
-    default_output,
+    output_path,
     probe,
     run_ffmpeg,
-    unique_path,
     warn,
 )
 
@@ -17,10 +16,7 @@ SPEED_PRESETS = ("0.5", "0.75", "1.0", "1.25", "1.5", "2.0")
 
 
 def _out(src: Path, dest: Path | str | None, suffix: str, tag: str) -> Path:
-    if dest:
-        p = Path(dest)
-        return unique_path(p) if p.exists() else p
-    return default_output(src, suffix, tag)
+    return output_path(dest, src, suffix=suffix, tag=tag)
 
 
 def crop_video(

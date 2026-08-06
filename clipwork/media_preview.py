@@ -166,6 +166,9 @@ class MediaSession:
         self.on_frame: Callable[[Image.Image | None, float], None] | None = None
         self.on_position: Callable[[float], None] | None = None
         self.on_status: Callable[[str], None] | None = None
+        # Live preview audio (matches Edit mute/volume when set by the GUI)
+        self.preview_volume: float = 1.0
+        self.preview_mute: bool = False
 
     @property
     def duration(self) -> float:
@@ -531,6 +534,10 @@ class MediaSession:
         if end_seconds is not None and end_seconds > start_seconds:
             cmd.extend(["-t", f"{(end_seconds - start_seconds):.3f}"])
         cmd.extend(["-i", str(self.path), "-vn"])
+        # Match Edit mute / volume in the preview (what you hear ≈ export)
+        vol = 0.0 if self.preview_mute else max(0.0, min(4.0, float(self.preview_volume)))
+        if abs(vol - 1.0) > 1e-3:
+            cmd.extend(["-af", f"volume={vol:.4f}"])
         try:
             # DETACHED / no console window on Windows
             creation = 0
