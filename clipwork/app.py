@@ -340,16 +340,55 @@ class ClipworkApp(_CTkBase):
         right = ctk.CTkFrame(main, width=300)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
-        ctk.CTkLabel(right, text="Tools", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", padx=10, pady=(10, 4)
+        tools_hdr = ctk.CTkFrame(right, fg_color="transparent")
+        tools_hdr.pack(fill="x", padx=10, pady=(10, 2))
+        ctk.CTkLabel(tools_hdr, text="Tools", font=ctk.CTkFont(weight="bold")).pack(
+            side="left"
         )
-        self.tool = ctk.CTkSegmentedButton(
+        ctk.CTkLabel(
+            tools_hdr,
+            text="scroll →",
+            text_color=("gray50", "gray55"),
+            font=ctk.CTkFont(size=11),
+        ).pack(side="right")
+
+        # Horizontal scroll strip (mouse wheel / trackpad + scrollbar)
+        self._tool_names = [
+            "Convert",
+            "Compress",
+            "Trim",
+            "Edit",
+            "Audio",
+            "Image",
+            "More",
+        ]
+        self._tool_var = ctk.StringVar(value="Trim")
+        self._tool_buttons: dict[str, ctk.CTkButton] = {}
+        self._tool_tabs = ctk.CTkScrollableFrame(
             right,
-            values=["Convert", "Compress", "Trim", "Edit", "Audio", "Image", "More"],
-            command=self._on_tool_change,
+            orientation="horizontal",
+            height=44,
+            fg_color=("gray90", "gray17"),
+            corner_radius=8,
+            scrollbar_button_color=("gray70", "gray35"),
         )
-        self.tool.set("Trim")
-        self.tool.pack(fill="x", padx=10, pady=4)
+        self._tool_tabs.pack(fill="x", padx=8, pady=(2, 4))
+        for name in self._tool_names:
+            btn = ctk.CTkButton(
+                self._tool_tabs,
+                text=name,
+                width=76,
+                height=28,
+                corner_radius=6,
+                font=ctk.CTkFont(size=12),
+                command=lambda n=name: self._select_tool(n),
+            )
+            btn.pack(side="left", padx=3, pady=4)
+            self._tool_buttons[name] = btn
+        # Compatibility: existing code uses self.tool.get()
+        self.tool = self._tool_var
+        self._bind_tool_tabs_scroll()
+        self._style_tool_tabs("Trim")
 
         self.tool_frame = ctk.CTkScrollableFrame(right, fg_color="transparent")
         self.tool_frame.pack(fill="both", expand=True, padx=4, pady=4)
@@ -629,6 +668,73 @@ class ClipworkApp(_CTkBase):
         if self._logo_path:
             parts.append(f"Logo: {self._logo_path.name}")
         self.edit_files_label.configure(text=" · ".join(parts) if parts else "No .srt / logo chosen")
+
+    def _select_tool(self, name: str) -> None:
+        """Switch active tool tab and highlight its pill button."""
+        if name not in self._tool_names:
+            return
+        self._tool_var.set(name)
+        self._style_tool_tabs(name)
+        self._on_tool_change(name)
+        # Keep selected pill in view when chosen via code or click near edge
+        try:
+            btn = self._tool_buttons.get(name)
+            if btn is not None:
+                self._tool_tabs._parent_canvas.see(btn)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def _style_tool_tabs(self, active: str) -> None:
+        for n, btn in self._tool_buttons.items():
+            if n == active:
+                btn.configure(
+                    fg_color=("#3B8ED0", "#1F6AA5"),
+                    hover_color=("#36719F", "#144870"),
+                    text_color=("white", "white"),
+                )
+            else:
+                btn.configure(
+                    fg_color=("gray80", "gray28"),
+                    hover_color=("gray70", "gray35"),
+                    text_color=("gray10", "gray90"),
+                )
+
+    def _bind_tool_tabs_scroll(self) -> None:
+        """Mouse wheel / trackpad scrolls the tool strip horizontally."""
+
+        def _wheel(event: Any) -> str | None:
+            canvas = getattr(self._tool_tabs, "_parent_canvas", None)
+            if canvas is None:
+                return None
+            delta = 0
+            if getattr(event, "delta", 0):
+                # Windows / macOS: positive = up/away; map to left/right
+                delta = -1 if event.delta > 0 else 1
+            elif getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            if delta:
+                canvas.xview_scroll(delta * 2, "units")
+            return "break"
+
+        # Bind on strip and children so wheel works when hovering pills
+        widgets = [self._tool_tabs]
+        try:
+            widgets.append(self._tool_tabs._parent_canvas)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        for w in widgets:
+            w.bind("<MouseWheel>", _wheel)
+            w.bind("<Shift-MouseWheel>", _wheel)
+            w.bind("<Button-4>", _wheel)
+            w.bind("<Button-5>", _wheel)
+        # Re-bind when buttons are added (already exist); also bind each pill
+        for btn in self._tool_buttons.values():
+            btn.bind("<MouseWheel>", _wheel)
+            btn.bind("<Shift-MouseWheel>", _wheel)
+            btn.bind("<Button-4>", _wheel)
+            btn.bind("<Button-5>", _wheel)
 
     def _on_tool_change(self, name: str) -> None:
         for n, fr in self._panels.items():
