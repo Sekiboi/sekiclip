@@ -599,10 +599,26 @@ class ClipworkApp(_CTkBase):
         self.ff_label.configure(text="ffmpeg: OK" if ops.find_ffmpeg() else "ffmpeg: MISSING")
 
     def _log(self, msg: str) -> None:
-        self.log.configure(state="normal")
-        self.log.insert("end", msg + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        """Append a line to the bottom output log (main thread)."""
+        try:
+            self.log.configure(state="normal")
+            self.log.insert("end", msg + "\n")
+            # Keep log from growing forever
+            try:
+                end_idx = self.log.index("end-1c")
+                line_count = int(float(end_idx.split(".")[0]))
+                if line_count > 500:
+                    self.log.delete("1.0", f"{line_count - 400}.0")
+            except Exception:
+                pass
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _export_log(self, msg: str) -> None:
+        """Thread-safe log line for export workers."""
+        self.after(0, lambda m=msg: self._log(m))
 
     def _set_status(self, msg: str) -> None:
         self.status.configure(text=msg)
@@ -1120,9 +1136,11 @@ class ClipworkApp(_CTkBase):
             return self._files[self._selected_idx]
         return None
 
-    def _set_progress(self, frac: float, label: str) -> None:
+    def _set_progress(self, frac: float, label: str, *, to_log: bool = False) -> None:
         self.progress.set(max(0.0, min(1.0, frac)))
         self.progress_label.configure(text=label)
+        if to_log:
+            self._log(f"  … {label}")
 
     def _remember_output_dir(self, path: Path) -> None:
         try:
@@ -1342,14 +1360,27 @@ class ClipworkApp(_CTkBase):
 
         self._busy = True
         self._export_proc_active = True
+        self._last_prog_log_frac = -1.0
         self.btn_cancel.configure(state="normal")
         self.btn_open_folder.configure(state="disabled")
         self._session.stop()
         self.btn_play.configure(text="Play")
         label = dest.name if dest else "…"
         self._set_status(f"Exporting to {label}…")
-        self._set_progress(0.02, "Starting…")
-        self._set_queue_text("Export running…\n")
+        self._set_progress(0.02, "Preparing export…")
+        self._log("—")
+        self._log(f"Export started · tool={tool}" + (" · batch" if batch else ""))
+        if src:
+            self._log(f"  Source: {src.name}")
+        self._log(f"  Destination: {dest}")
+        if tool in ("Trim", "Edit") and self._session.info:
+            self._log(
+                f"  Selection: {format_time(self._session.in_point)} → "
+                f"{format_time(self._session.out_or_end)} "
+                f"({format_time(max(0, self._session.out_or_end - self._session.in_point))})"
+            )
+        self._log("  Preparing… (starting encoder)")
+        self._set_queue_text("Export running…\n" + (f"Batch: {len(self._files)} files\n" if batch else f"{label}\n"))
 
         def work() -> None:
             try:
@@ -1359,8 +1390,10 @@ class ClipworkApp(_CTkBase):
                     lines = self._export_worker(tool, src, dest)  # type: ignore[arg-type]
                 self.after(0, lambda: self._export_done(True, lines, dest if not batch else dest))
             except CancelledError:
+                self._export_log("  Cancelled by user.")
                 self.after(0, lambda: self._export_done(False, ["Cancelled by user"], None))
             except Exception as exc:  # noqa: BLE001
+                self._export_log(f"  Error: {exc}")
                 self.after(0, lambda: self._export_done(False, [str(exc)], None))
 
         threading.Thread(target=work, daemon=True).start()
@@ -1523,13 +1556,18 @@ class ClipworkApp(_CTkBase):
         op_name, tag, run_one = self._batch_runner_for_tool(tool)
         total = len(files)
 
-        queue_lines: list[str] = [f"Batch → {out_dir}", ""]
+        queue_lines: list[str] = [f"Batch → {out_dir}", f"Operation: {op_name}", ""]
+        self._export_log(f"  Batch: {total} file(s) → {out_dir}")
+        self._export_log(f"  Operation: {op_name}")
 
         def on_prog(i: int, n: int, name: str) -> None:
             self.after(
                 0,
-                lambda: self._set_progress(i / max(n, 1), f"Batch {i}/{n}: {name}"),
+                lambda: self._set_progress(
+                    i / max(n, 1), f"Batch {i}/{n}: {name}", to_log=False
+                ),
             )
+            self._export_log(f"  [{i}/{n}] Processing {name}…")
             self.after(
                 0,
                 lambda: self._set_queue_text(
@@ -1537,11 +1575,15 @@ class ClipworkApp(_CTkBase):
                 ),
             )
 
+        def run_one_logged(src: Path, dest: Path) -> Path:
+            self._export_log(f"  → {src.name}")
+            return run_one(src, dest)
+
         results = ops.batch_to_folder(
             files,
             out_dir,
             op_name=op_name,
-            run_one=run_one,
+            run_one=run_one_logged,
             name_tag=tag,
             on_progress=on_prog,
         )
@@ -1552,10 +1594,13 @@ class ClipworkApp(_CTkBase):
                 ok_n += 1
                 lines.append(str(r["dest"]))
                 queue_lines.append(f"✓ {Path(r['src']).name} → {Path(str(r['dest'])).name}")
+                self._export_log(f"  ✓ {Path(r['src']).name} → {Path(str(r['dest'])).name}")
             else:
                 lines.append(f"FAIL {Path(r['src']).name}: {r['error']}")
                 queue_lines.append(f"✗ {Path(r['src']).name}: {r['error']}")
+                self._export_log(f"  ✗ {Path(r['src']).name}: {r['error']}")
         lines.insert(0, f"Batch done: {ok_n}/{total} ok → {out_dir}")
+        self._export_log(f"  Batch complete: {ok_n}/{total} succeeded")
         self.after(0, lambda: self._set_queue_text("\n".join(queue_lines)))
         if ok_n == 0:
             raise RuntimeError("All batch jobs failed")
@@ -1565,11 +1610,28 @@ class ClipworkApp(_CTkBase):
         results: list[str] = []
 
         def prog(frac: float, label: str) -> None:
-            self.after(0, lambda: self._set_progress(frac, label))
+            # Progress bar always; bottom log throttled (~every 5%)
+            to_log = False
+            try:
+                prev = getattr(self, "_last_prog_log_frac", -1.0)
+                if frac >= 0.999 or prev < 0 or (frac - prev) >= 0.05:
+                    to_log = True
+                    self._last_prog_log_frac = frac
+            except Exception:
+                to_log = True
+            self.after(
+                0,
+                lambda f=frac, l=label, tl=to_log: self._set_progress(f, l, to_log=tl),
+            )
+
+        def note(msg: str) -> None:
+            self._export_log(msg)
+            self.after(0, lambda m=msg: self._set_status(m[:80]))
 
         # User picked this path (Save dialog already confirms overwrite on Windows).
         # Remove existing file so ops unique_path() does not invent _1 suffixes.
         if dest.exists():
+            note(f"  Replacing existing file: {dest.name}")
             try:
                 dest.unlink()
             except OSError as exc:
@@ -1577,6 +1639,8 @@ class ClipworkApp(_CTkBase):
 
         if tool == "More" and self.var_more.get() == "concat":
             vids = [p for p in self._files if p.suffix.lower() in VIDEO_EXTS]
+            note(f"  Concatenating {len(vids)} videos (re-encode for compatibility)…")
+            prog(0.05, "Concat: starting…")
             jr = jobs.run_job(
                 "concat",
                 lambda: ops.concat_videos(vids, dest, reencode=True),
@@ -1584,7 +1648,8 @@ class ClipworkApp(_CTkBase):
             )
             if not jr.ok:
                 raise RuntimeError(jr.error)
-            prog(1.0, "Done")
+            note("  Concat finished.")
+            prog(1.0, "100% · done")
             return [str(jr.paths[0] if jr.paths else dest)]
 
         assert src is not None
@@ -1599,7 +1664,15 @@ class ClipworkApp(_CTkBase):
             reenc = bool(self.var_reencode.get())
             out_path = dest
             suffix = dest.suffix or src.suffix or ".mp4"
+            mode = "re-encode (accurate)" if reenc else "stream copy (fast)"
+            note(f"  Trim mode: {mode}")
+            note(
+                f"  Cutting {format_time(start)} → {format_time(end or 0)}"
+                + (f" ({format_time(dur)})" if dur else "")
+            )
             if reenc and ops.find_ffmpeg():
+                note("  Starting encoder (libx264 veryfast)…")
+                prog(0.03, "Trim: encoding…")
                 # -ss after -i = accurate cut for re-encode; -t = selection length
                 args = ["-i", str(src), "-ss", str(start)]
                 if dur:
@@ -1630,10 +1703,13 @@ class ClipworkApp(_CTkBase):
                     run_ffmpeg_with_progress(args, duration_hint=hint, on_progress=prog)
                     jr = jobs.JobResult("trim", [out_path], True, 0.0)
                 except CancelledError:
+                    note("  Trim cancelled.")
                     raise
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(str(exc)) from exc
             else:
+                note("  Stream-copy trim (may snap to keyframes)…")
+                prog(0.2, "Trim: copying…")
                 jr = jobs.run_job(
                     "trim",
                     lambda: ops.trim_media(
@@ -1641,17 +1717,21 @@ class ClipworkApp(_CTkBase):
                     ),
                     inputs=[src],
                 )
-                prog(1.0, "Done")
             if not jr.ok and not out_path.is_file():
                 raise RuntimeError(jr.error or "trim failed")
+            note(f"  Writing finished: {out_path.name}")
+            prog(1.0, "100% · done")
             results.append(str(out_path if out_path.is_file() else jr.paths[0]))
             return results
 
         def go(name: str, fn):  # type: ignore[no-untyped-def]
+            note(f"  Running {name}…")
+            prog(0.1, f"{name}: working…")
             jr = jobs.run_job(name, fn, inputs=[src])
             if not jr.ok:
                 raise RuntimeError(jr.error or name)
-            prog(1.0, "Done")
+            note(f"  {name} finished → {dest.name}")
+            prog(1.0, "100% · done")
             return [str(p) for p in jr.paths] if jr.paths else [str(dest)]
 
         if tool == "Convert":
@@ -1892,8 +1972,9 @@ class ClipworkApp(_CTkBase):
         self._export_proc_active = False
         self.btn_cancel.configure(state="disabled")
         if ok:
-            self._set_progress(1.0, "Done")
+            self._set_progress(1.0, "100% · done", to_log=True)
             self._set_status("Done")
+            self._log("Export complete.")
             # Prefer concrete dest path for Open folder
             path: Path | None = dest
             for line in lines:
@@ -1904,11 +1985,14 @@ class ClipworkApp(_CTkBase):
             self._last_export_path = path
             if path:
                 self.btn_open_folder.configure(state="normal")
+                self._log(f"  Open folder available for: {path}")
         else:
-            self._set_status("Export failed" if lines and "Cancel" not in lines[0] else "Cancelled")
-            self._set_progress(0, "Cancelled" if lines and "Cancel" in lines[0] else "Failed")
+            cancelled = bool(lines and "Cancel" in lines[0])
+            self._set_status("Cancelled" if cancelled else "Export failed")
+            self._set_progress(0, "Cancelled" if cancelled else "Failed", to_log=True)
+            self._log("Export stopped." if cancelled else "Export failed.")
         for line in lines:
-            self._log(("OK " if ok else "ERR ") + line)
+            self._log(("  ✓ " if ok else "  ✗ ") + line)
         if ok and lines:
             messagebox.showinfo(__app_name__, f"Saved:\n{lines[0]}")
 
