@@ -38,6 +38,8 @@ except ImportError:
 APP_USER_MODEL_ID = "Sekiboi.Clipwork"
 MIN_W, MIN_H = 1100, 720
 PREVIEW_MAX = (720, 405)
+# Cap UI paint rate during play (OpenCV seek is heavy).
+_PREVIEW_MIN_INTERVAL_MS = 50
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".mpeg", ".mpg"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus"}
@@ -116,9 +118,11 @@ class ClipworkApp(_CTkBase):
         self._session = MediaSession()
         self._session.on_frame = self._on_session_frame
         self._session.on_position = self._on_session_position
-        self._preview_photo = None  # keep ref
+        self._preview_photo = None  # keep ref (CTkImage or PhotoImage)
         self._scrub_dragging = False
         self._updating_scrub = False
+        self._last_paint_ms = 0.0
+        self._paint_pending = False
 
         self._build()
         self._set_icons()
@@ -176,19 +180,23 @@ class ClipworkApp(_CTkBase):
         center = ctk.CTkFrame(main)
         center.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
-        self.preview_label = ctk.CTkLabel(
-            center,
-            text="Add a video, audio, or image file to preview",
-            width=PREVIEW_MAX[0],
-            height=PREVIEW_MAX[1],
-            fg_color=("gray85", "gray18"),
-            corner_radius=8,
+        self.preview_frame = ctk.CTkFrame(
+            center, width=PREVIEW_MAX[0], height=PREVIEW_MAX[1], fg_color=("gray85", "gray18")
         )
-        self.preview_label.pack(padx=10, pady=(10, 6))
+        self.preview_frame.pack(padx=10, pady=(10, 6))
+        self.preview_frame.pack_propagate(False)
+        self.preview_label = ctk.CTkLabel(
+            self.preview_frame,
+            text="Add a video, audio, or image file to preview",
+            fg_color="transparent",
+        )
+        self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
+        # Optional native tk label fallback when CTkImage is unhappy
+        self._tk_preview = None
         if _HAS_DND:
             try:
-                self.preview_label.drop_target_register(DND_FILES)
-                self.preview_label.dnd_bind("<<Drop>>", self._on_drop)
+                self.preview_frame.drop_target_register(DND_FILES)
+                self.preview_frame.dnd_bind("<<Drop>>", self._on_drop)
             except Exception:
                 pass
 
@@ -433,7 +441,13 @@ class ClipworkApp(_CTkBase):
         self._files.clear()
         self._selected_idx = -1
         self._rebuild_file_list()
-        self.preview_label.configure(image=None, text="Add a video, audio, or image file to preview")
+        self._preview_photo = None
+        if self._tk_preview is not None:
+            self._tk_preview.place_forget()
+        self.preview_label.configure(
+            image=None, text="Add a video, audio, or image file to preview"
+        )
+        self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
         self.info_line.configure(text="")
         self._update_time_labels(0, 0)
 
@@ -456,16 +470,25 @@ class ClipworkApp(_CTkBase):
 
         def load() -> None:
             try:
+                # Don't fire UI callbacks from worker until open finishes.
+                prev_frame = self._session.on_frame
+                prev_pos = self._session.on_position
+                self._session.on_frame = None
+                self._session.on_position = None
                 info = self._session.open(path)
+                self._session.on_frame = prev_frame
+                self._session.on_position = prev_pos
                 self.after(0, lambda: self._on_loaded(info.summary, info.duration))
             except Exception as exc:  # noqa: BLE001
+                self._session.on_frame = self._on_session_frame
+                self._session.on_position = self._on_session_position
                 self.after(0, lambda: self._load_failed(str(exc)))
 
         threading.Thread(target=load, daemon=True).start()
 
     def _on_loaded(self, summary: str, duration: float) -> None:
         self.info_line.configure(text=summary)
-        self._set_status("Ready — scrub timeline, set In/Out, export")
+        self._set_status("Ready - scrub timeline, set In/Out, export")
         self._updating_scrub = True
         self.scrub.configure(to=max(duration, 0.001))
         self.scrub.set(0)
@@ -473,6 +496,11 @@ class ClipworkApp(_CTkBase):
         self._update_time_labels(0, duration)
         self._update_io_label()
         self.btn_play.configure(text="Play")
+        # First paint on the UI thread (safe for CTk / Tk photo images)
+        try:
+            self._session.seek(0.0)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Preview seek: {exc}")
 
     def _load_failed(self, err: str) -> None:
         self._set_status("Load failed")
@@ -483,28 +511,69 @@ class ClipworkApp(_CTkBase):
     def _on_session_frame(self, img: Image.Image | None, t: float) -> None:
         if img is None:
             return
-        # Marshal to UI thread
-        self.after(0, lambda i=img.copy(), tt=t: self._show_frame(i, tt))
+        # Copy immediately; source buffer may be reused by OpenCV.
+        try:
+            frame = img.copy()
+        except Exception:
+            return
+        # Marshal to UI thread (Tk/CTk images must be created on main thread)
+        self.after(0, lambda i=frame, tt=t: self._show_frame(i, tt))
 
     def _on_session_position(self, t: float) -> None:
         self.after(0, lambda: self._sync_scrub(t))
 
     def _show_frame(self, img: Image.Image, t: float) -> None:
-        try:
-            fitted = _fit_image(img)
-            # CTkImage preferred when available
-            try:
-                ctk_img = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
-                self._preview_photo = ctk_img
-                self.preview_label.configure(image=ctk_img, text="")
-            except Exception:
-                from PIL import ImageTk
+        """Paint preview on the main thread only."""
+        import time as _time
 
-                photo = ImageTk.PhotoImage(fitted)
-                self._preview_photo = photo
-                self.preview_label.configure(image=photo, text="")
+        now = _time.perf_counter() * 1000.0
+        if self._session.playing and (now - self._last_paint_ms) < _PREVIEW_MIN_INTERVAL_MS:
+            return
+        self._last_paint_ms = now
+        try:
+            fitted = img.convert("RGB")
+            fitted.thumbnail(PREVIEW_MAX, Image.Resampling.LANCZOS)
+            w, h = int(fitted.size[0]), int(fitted.size[1])
+            if w < 1 or h < 1:
+                return
+
+            # Prefer CTkImage (required by CTkLabel). Separate copies for light/dark.
+            try:
+                light = fitted
+                dark = fitted.copy()
+                ctk_img = ctk.CTkImage(light_image=light, dark_image=dark, size=(w, h))
+                self._preview_photo = ctk_img
+                if self._tk_preview is not None:
+                    self._tk_preview.place_forget()
+                self.preview_label.configure(image=ctk_img, text="")
+                self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
+                return
+            except Exception as ctk_exc:
+                # Fallback: classic tk Label + PhotoImage (never pass PhotoImage to CTkLabel)
+                try:
+                    import tkinter as tk
+                    from PIL import ImageTk
+
+                    if self._tk_preview is None:
+                        self._tk_preview = tk.Label(
+                            self.preview_frame, bg="#2b2b2b", borderwidth=0
+                        )
+                    photo = ImageTk.PhotoImage(fitted, master=self)
+                    self._preview_photo = photo
+                    self._tk_preview.configure(image=photo)
+                    self.preview_label.place_forget()
+                    self._tk_preview.place(relx=0.5, rely=0.5, anchor="center")
+                except Exception as tk_exc:
+                    self._log(
+                        f"Preview paint failed (CTk: {ctk_exc}; Tk: {tk_exc})"
+                    )
+                    self.preview_label.configure(
+                        image=None,
+                        text=f"Preview unavailable\n{type(ctk_exc).__name__}: {ctk_exc}",
+                    )
+                    self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
         except Exception as exc:  # noqa: BLE001
-            self._log(f"Preview paint: {exc}")
+            self._log(f"Preview paint: {type(exc).__name__}: {exc}")
 
     def _sync_scrub(self, t: float) -> None:
         if self._scrub_dragging or self._updating_scrub:

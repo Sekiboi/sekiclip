@@ -260,15 +260,43 @@ class MediaSession:
                 self._emit_frame(self._image.copy(), 0.0)
                 return
             if self._cap is not None:
-                import cv2
-
+                try:
+                    import cv2
+                    import numpy as np
+                except ImportError as exc:
+                    self._emit_frame(
+                        self._placeholder(
+                            "OpenCV missing — pip install opencv-python-headless"
+                        ),
+                        seconds,
+                    )
+                    return
                 self._cap.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000.0)
                 ok, frame = self._cap.read()
                 if ok and frame is not None:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = Image.fromarray(rgb)
-                    self._emit_frame(img, seconds)
-                    return
+                    try:
+                        if frame.ndim == 2:
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                        elif frame.shape[2] == 4:
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                        else:
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        # Contiguous uint8 copy so PIL/Tk never hold a transient buffer
+                        rgb = np.ascontiguousarray(rgb)
+                        img = Image.fromarray(rgb, mode="RGB")
+                        self._emit_frame(img, seconds)
+                        return
+                    except Exception:
+                        self._emit_frame(
+                            self._placeholder(f"Frame decode failed @ {seconds:.2f}s"),
+                            seconds,
+                        )
+                        return
+                self._emit_frame(
+                    self._placeholder(f"No frame @ {seconds:.2f}s"),
+                    seconds,
+                )
+                return
             if self.info.kind == MediaKind.AUDIO or (
                 self.info.has_audio and not self.info.has_video
             ):
