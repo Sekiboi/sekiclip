@@ -342,3 +342,39 @@ def output_path(
     if dest is not None and str(dest).strip():
         return Path(dest)
     return default_output(Path(src), suffix, tag)
+
+
+def paths_same(a: Path | str | None, b: Path | str | None) -> bool:
+    """True if both paths exist as the same file (best-effort on Windows)."""
+    if a is None or b is None:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        try:
+            return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(
+                os.path.abspath(str(b))
+            )
+        except OSError:
+            return Path(a) == Path(b)
+
+
+def staging_path(final: Path | str) -> Path:
+    """Sibling temp file for safe encode-then-replace (same folder as final)."""
+    final = Path(final)
+    # Hidden-ish name so it sorts near the original; same suffix for ffmpeg muxers
+    return final.with_name(f".{final.stem}.clipwork_tmp{final.suffix or '.mp4'}")
+
+
+def commit_staged(staged: Path | str, final: Path | str) -> Path:
+    """Atomically replace ``final`` with the staged encode result."""
+    import os as _os
+
+    staged = Path(staged)
+    final = Path(final)
+    if not staged.is_file():
+        raise RuntimeError(f"Encode produced no output: {staged.name}")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    # os.replace is atomic on the same volume (Windows + POSIX)
+    _os.replace(str(staged), str(final))
+    return final

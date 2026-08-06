@@ -17,7 +17,13 @@ from clipwork import jobs
 from clipwork import media_ops as ops
 from clipwork import prefs as app_prefs
 from clipwork.diagnostics import build_report
-from clipwork.media_ops.ffmpeg_util import CancelledError, request_cancel
+from clipwork.media_ops.ffmpeg_util import (
+    CancelledError,
+    commit_staged,
+    paths_same,
+    request_cancel,
+    staging_path,
+)
 from clipwork.media_preview import (
     MediaSession,
     format_time,
@@ -148,6 +154,7 @@ class ClipworkApp(_CTkBase):
         self._updating_time_fields = False
         self._batch_queue_lines: list[str] = []
         self._layout_ready = False
+        self._pending_reload_path: Path | None = None  # re-open after in-place replace
 
         self._build()
         self._set_icons()
@@ -1780,7 +1787,8 @@ class ClipworkApp(_CTkBase):
         ext = src.suffix.lower()
 
         if tool == "Trim":
-            return initial_dir, f"{stem}_trim{src.suffix or '.mp4'}", video_ft + audio_ft
+            # Default to original name — user can replace the open file in one Save
+            return initial_dir, f"{stem}{src.suffix or '.mp4'}", video_ft + audio_ft
 
         if tool == "Convert":
             fmt = (self.var_fmt.get() or "mp4").lower()
@@ -1846,8 +1854,11 @@ class ClipworkApp(_CTkBase):
             if act == "target_size":
                 return initial_dir, f"{stem}_sized.mp4", video_ft
             if act == "render_cut":
-                return initial_dir, f"{stem}_cut.mp4", video_ft
-            if act in ("crop", "speed", "fade", "flip", "volume", "burn_subs", "logo"):
+                # Default to original name so Save can replace the open project file
+                return initial_dir, f"{stem}{src.suffix or '.mp4'}", video_ft
+            if act == "fade":
+                return initial_dir, f"{stem}{src.suffix or '.mp4'}", video_ft
+            if act in ("crop", "speed", "flip", "volume", "burn_subs", "logo"):
                 tag = act
                 return initial_dir, f"{stem}_{tag}{src.suffix or '.mp4'}", video_ft + audio_ft
             return initial_dir, f"{stem}_edit{src.suffix or '.mp4'}", video_ft
@@ -1866,13 +1877,13 @@ class ClipworkApp(_CTkBase):
         return initial_dir, f"{stem}_export{src.suffix or '.mp4'}", video_ft + audio_ft + image_ft
 
     def _ask_save_path(self, tool: str, src: Path | None) -> Path | None:
-        """Show Save As dialog. Existing files may be replaced (OS confirms on Windows)."""
+        """Show Save As dialog. Existing files (including the open one) may be replaced."""
         initial_dir, name, filetypes = self._export_defaults(tool, src)
         # Default extension from suggested name
         def_ext = Path(name).suffix or ".mp4"
         path_str = filedialog.asksaveasfilename(
             parent=self,
-            title="Save exported file as… (existing file will be replaced)",
+            title="Save exported file as… (can replace the open file)",
             initialdir=initial_dir,
             initialfile=name,
             defaultextension=def_ext,
@@ -1887,26 +1898,22 @@ class ClipworkApp(_CTkBase):
         except OSError as exc:
             messagebox.showerror(__app_name__, f"Cannot create folder:\n{exc}")
             return None
-        # Extra confirm when replacing (covers platforms that skip OS prompt)
+        # Confirm replace — special copy when replacing the file you're editing
         if dest.is_file():
-            if not messagebox.askyesno(
-                __app_name__,
-                f"Replace existing file?\n\n{dest.name}\n\nThis cannot be undone.",
-                icon="warning",
-            ):
+            inplace = paths_same(src, dest)
+            if inplace:
+                msg = (
+                    f"Replace the file you're editing?\n\n{dest.name}\n\n"
+                    "Clipwork will encode safely to a temp file, then swap it in.\n"
+                    "This cannot be undone."
+                )
+            else:
+                msg = (
+                    f"Replace existing file?\n\n{dest.name}\n\n"
+                    "This cannot be undone."
+                )
+            if not messagebox.askyesno(__app_name__, msg, icon="warning"):
                 return None
-        # Never overwrite the open source in-place (ffmpeg can't safely read+write same path)
-        if src is not None:
-            try:
-                if dest.resolve() == Path(src).resolve():
-                    messagebox.showerror(
-                        __app_name__,
-                        "Cannot overwrite the file you currently have open.\n"
-                        "Save under a new name, then replace the original if you want.",
-                    )
-                    return None
-            except OSError:
-                pass
         self._remember_output_dir(dest)
         return dest
 
@@ -2003,12 +2010,29 @@ class ClipworkApp(_CTkBase):
                     lines = self._export_batch(tool, list(self._files), dest)  # type: ignore[arg-type]
                 else:
                     lines = self._export_worker(tool, src, dest)  # type: ignore[arg-type]
-                self.after(0, lambda: self._export_done(True, lines, dest if not batch else dest))
+                # Prefer concrete path from worker (in-place replace returns final path)
+                done_dest = Path(lines[0]) if lines else dest
+                self.after(0, lambda: self._export_done(True, lines, done_dest if not batch else dest))
             except CancelledError:
                 self._export_log("  Cancelled by user.")
+                # Clean leftover staging file if any
+                try:
+                    if dest is not None and src is not None and paths_same(src, dest):
+                        sp = staging_path(dest)
+                        if sp.is_file():
+                            sp.unlink()
+                except Exception:
+                    pass
                 self.after(0, lambda: self._export_done(False, ["Cancelled by user"], None))
             except Exception as exc:  # noqa: BLE001
                 self._export_log(f"  Error: {exc}")
+                try:
+                    if dest is not None and src is not None and paths_same(src, dest):
+                        sp = staging_path(dest)
+                        if sp.is_file():
+                            sp.unlink()
+                except Exception:
+                    pass
                 self.after(0, lambda: self._export_done(False, [str(exc)], None))
 
         threading.Thread(target=work, daemon=True).start()
@@ -2265,8 +2289,44 @@ class ClipworkApp(_CTkBase):
             raise RuntimeError("All batch jobs failed")
         return lines
 
+    def _release_open_file_for_replace(self, timeout: float = 12.0) -> None:
+        """Close preview handles so Windows will allow replacing the open path."""
+        done = threading.Event()
+
+        def _close() -> None:
+            try:
+                self._session.close()
+                self.btn_play.configure(text="Play")
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        self.after(0, _close)
+        if not done.wait(timeout):
+            raise RuntimeError(
+                "Could not release the open file (preview still holding it). Try again."
+            )
+
+    def _reload_after_inplace_replace(self, path: Path) -> None:
+        """Re-open the project file after a successful in-place replace."""
+        path = Path(path)
+        # Keep list entry pointing at the same path
+        if 0 <= self._selected_idx < len(self._files):
+            self._files[self._selected_idx] = path
+        elif path not in self._files:
+            self._files.append(path)
+            self._selected_idx = len(self._files) - 1
+        self._log(f"  Reloading preview: {path.name}")
+        self._select_file(self._selected_idx if self._selected_idx >= 0 else 0)
+
     def _export_worker(self, tool: str, src: Path | None, dest: Path) -> list[str]:
         results: list[str] = []
+        final_dest = Path(dest)
+        # Encode to a sibling temp when replacing the open source (ffmpeg can't read+write same path)
+        inplace = bool(src is not None and paths_same(src, final_dest))
+        write_dest = staging_path(final_dest) if inplace else final_dest
+        dest = write_dest  # all encode targets use write_dest
 
         def prog(frac: float, label: str) -> None:
             # Progress bar always; bottom log throttled (~every 5%)
@@ -2287,14 +2347,42 @@ class ClipworkApp(_CTkBase):
             self._export_log(msg)
             self.after(0, lambda m=msg: self._set_status(m[:80]))
 
-        # User picked this path (Save dialog already confirms overwrite on Windows).
-        # Remove existing file so ops unique_path() does not invent _1 suffixes.
-        if dest.exists():
-            note(f"  Replacing existing file: {dest.name}")
+        def finish(paths: list[str]) -> list[str]:
+            """If in-place, swap temp → original after releasing the open handle."""
+            if not inplace:
+                return paths
+            note(f"  Swapping temp encode into {final_dest.name}…")
+            # Ensure encode landed on the staging path
+            staged = Path(dest)
+            if paths:
+                cand = Path(paths[0])
+                if cand.is_file():
+                    staged = cand
             try:
-                dest.unlink()
+                self._release_open_file_for_replace()
+                commit_staged(staged, final_dest)
+            except Exception:
+                # Leave staging file for diagnosis if swap failed
+                raise
+            self._pending_reload_path = final_dest
+            note(f"  Replaced open file: {final_dest.name}")
+            return [str(final_dest)]
+
+        # Prepare target
+        if inplace:
+            note(f"  Safe replace of open file: {final_dest.name}")
+            note("  Encoding to temp, then swapping in (you can edit the same file).")
+            if write_dest.exists():
+                try:
+                    write_dest.unlink()
+                except OSError as exc:
+                    raise RuntimeError(f"Cannot clear temp file {write_dest.name}: {exc}") from exc
+        elif final_dest.exists():
+            note(f"  Replacing existing file: {final_dest.name}")
+            try:
+                final_dest.unlink()
             except OSError as exc:
-                raise RuntimeError(f"Cannot overwrite {dest.name}: {exc}") from exc
+                raise RuntimeError(f"Cannot overwrite {final_dest.name}: {exc}") from exc
 
         if tool == "More" and self.var_more.get() == "concat":
             vids = [p for p in self._files if p.suffix.lower() in VIDEO_EXTS]
@@ -2309,7 +2397,8 @@ class ClipworkApp(_CTkBase):
                 raise RuntimeError(jr.error)
             note("  Concat finished.")
             prog(1.0, "100% · done")
-            return [str(jr.paths[0] if jr.paths else dest)]
+            out_list = [str(jr.paths[0] if jr.paths else dest)]
+            return finish(out_list)
 
         assert src is not None
         ext = src.suffix.lower()
@@ -2381,7 +2470,7 @@ class ClipworkApp(_CTkBase):
             note(f"  Writing finished: {out_path.name}")
             prog(1.0, "100% · done")
             results.append(str(out_path if out_path.is_file() else jr.paths[0]))
-            return results
+            return finish(results)
 
         def go(name: str, fn):  # type: ignore[no-untyped-def]
             note(f"  Running {name}…")
@@ -2391,7 +2480,8 @@ class ClipworkApp(_CTkBase):
                 raise RuntimeError(jr.error or name)
             note(f"  {name} finished → {dest.name}")
             prog(1.0, "100% · done")
-            return [str(p) for p in jr.paths] if jr.paths else [str(dest)]
+            paths = [str(p) for p in jr.paths] if jr.paths else [str(dest)]
+            return finish(paths)
 
         if tool == "Convert":
             fmt = self.var_fmt.get()
@@ -2531,7 +2621,7 @@ class ClipworkApp(_CTkBase):
                     raise
                 note(f"  Writing finished: {Path(out).name}")
                 prog(1.0, "100% · done")
-                return [str(out)]
+                return finish([str(out)])
             if act == "crop":
                 # Prefer visual crop rect if overlay was used; else margin field
                 if self._crop_mode or self._crop_rect != (0.1, 0.1, 0.9, 0.9):
@@ -2736,6 +2826,11 @@ class ClipworkApp(_CTkBase):
                 pass
             # Project stays loaded; export chrome returns to idle for the next job
             self._reset_export_chrome(status="Ready", keep_open_folder=bool(path))
+            # In-place replace closed the preview — reload the new file
+            reload_path = self._pending_reload_path
+            self._pending_reload_path = None
+            if reload_path and Path(reload_path).is_file():
+                self.after(80, lambda p=Path(reload_path): self._reload_after_inplace_replace(p))
             self._log("Ready for next export.")
             return
 
@@ -2743,6 +2838,9 @@ class ClipworkApp(_CTkBase):
         self._log("Export stopped." if cancelled else "Export failed.")
         for line in lines:
             self._log("  ✗ " + line)
+        # Drop pending reload; try to restore preview if we closed for a failed replace
+        failed_reload = self._pending_reload_path
+        self._pending_reload_path = None
         if cancelled:
             try:
                 messagebox.showinfo(__app_name__, "Export cancelled.")
@@ -2756,6 +2854,11 @@ class ClipworkApp(_CTkBase):
             except Exception:
                 pass
             self._reset_export_chrome(status="Ready")
+        # If session was closed during a failed in-place attempt, reopen original
+        if failed_reload is None and self._session.info is None and self._current_path():
+            cur = self._current_path()
+            if cur and cur.is_file():
+                self.after(80, lambda p=cur: self._reload_after_inplace_replace(p))
         self._log("Ready for next export.")
 
     # ── dialogs ─────────────────────────────────────────────
