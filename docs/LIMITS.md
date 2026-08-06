@@ -8,10 +8,12 @@ Not a multi-track NLE, color grading suite, or DAW.
 
 ## Preview
 
-- **Video:** OpenCV frame scrub + play (not audio monitoring during play in v1).
-- **Audio:** Waveform overview via ffmpeg; playhead on the waveform.
+- **Video:** OpenCV sequential playback (clock-synced, drops frames if behind). Scrub seeks by frame index. Preview stage is letterboxed 16:9.
+- **Audio:** Preview sound via **ffplay** (same family as ffmpeg). Needs `ffplay` on PATH (full ffmpeg builds include it).
+- **Audio-only:** Waveform overview + audible play through ffplay.
 - **Image:** Still preview.
 - Preview is for timing decisions; final quality is the exported file.
+- A/V sync is best-effort (separate video clock + ffplay audio).
 
 ## ffmpeg
 

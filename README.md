@@ -2,7 +2,7 @@
 
 Offline media editor for Windows. Preview video and audio, scrub a timeline, set In/Out, and export — convert, compress, trim, and fix common files on your PC. **No accounts, no uploads, no paid tier.**
 
-Requires **ffmpeg** on PATH (or under `vendor/`) for video and audio. Preview uses **OpenCV** (bundled via pip).
+Requires **ffmpeg** + **ffplay** on PATH (or under `vendor/`) for video/audio work and preview sound. Preview video uses **OpenCV** (pip).
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -17,7 +17,7 @@ Requires **ffmpeg** on PATH (or under `vendor/`) for video and audio. Preview us
 
 | Area | Tools |
 |------|--------|
-| **Visual editor** | Video frame preview, audio waveform, play/pause, timeline scrub, In/Out marks, export progress |
+| **Visual editor** | Video preview with sound, smoother frame playback, audio waveform, play/pause, timeline scrub, In/Out, export progress |
 | **Video** | Convert, compress presets, trim (from In/Out), remux, rotate, strip audio, frame grab, concat |
 | **Audio** | Convert, compress, extract from video, normalize, mono |
 | **Image** | Convert, resize, compress, rotate, flip, strip EXIF, images→PDF |

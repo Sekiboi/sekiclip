@@ -37,9 +37,9 @@ except ImportError:
 
 APP_USER_MODEL_ID = "Sekiboi.Clipwork"
 MIN_W, MIN_H = 1100, 720
-PREVIEW_MAX = (720, 405)
-# Cap UI paint rate during play (OpenCV seek is heavy).
-_PREVIEW_MIN_INTERVAL_MS = 50
+# Fixed preview stage (16:9). Frames letterbox into this for stable framing.
+PREVIEW_W, PREVIEW_H = 960, 540
+PREVIEW_MAX = (PREVIEW_W, PREVIEW_H)
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".mpeg", ".mpg"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus"}
@@ -78,9 +78,15 @@ def _parse_drop(data: str) -> list[Path]:
 
 
 def _fit_image(img: Image.Image, max_size: tuple[int, int] = PREVIEW_MAX) -> Image.Image:
-    out = img.copy()
-    out.thumbnail(max_size, Image.Resampling.LANCZOS)
-    return out
+    """Letterbox into a fixed stage so framing stays stable while scrubbing/playing."""
+    stage_w, stage_h = max_size
+    src = img.convert("RGB")
+    src.thumbnail((stage_w, stage_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (stage_w, stage_h), (20, 20, 24))
+    x = (stage_w - src.width) // 2
+    y = (stage_h - src.height) // 2
+    canvas.paste(src, (x, y))
+    return canvas
 
 
 if _HAS_DND and TkinterDnD is not None:
@@ -110,7 +116,7 @@ class ClipworkApp(_CTkBase):
         super().__init__()
         self.title(f"{__app_name__} {__version__}")
         self.minsize(MIN_W, MIN_H)
-        self.geometry("1200x780")
+        self.geometry("1280x860")
 
         self._files: list[Path] = []
         self._selected_idx: int = -1
@@ -118,11 +124,10 @@ class ClipworkApp(_CTkBase):
         self._session = MediaSession()
         self._session.on_frame = self._on_session_frame
         self._session.on_position = self._on_session_position
+        self._session.on_status = self._on_session_status
         self._preview_photo = None  # keep ref (CTkImage or PhotoImage)
         self._scrub_dragging = False
         self._updating_scrub = False
-        self._last_paint_ms = 0.0
-        self._paint_pending = False
 
         self._build()
         self._set_icons()
@@ -181,14 +186,17 @@ class ClipworkApp(_CTkBase):
         center.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
         self.preview_frame = ctk.CTkFrame(
-            center, width=PREVIEW_MAX[0], height=PREVIEW_MAX[1], fg_color=("gray85", "gray18")
+            center, width=PREVIEW_W, height=PREVIEW_H, fg_color=("#1a1a1e", "#141418")
         )
         self.preview_frame.pack(padx=10, pady=(10, 6))
         self.preview_frame.pack_propagate(False)
         self.preview_label = ctk.CTkLabel(
             self.preview_frame,
-            text="Add a video, audio, or image file to preview",
+            text="Add a video, audio, or image file to preview\n"
+            "Play includes sound once audio preview is ready",
             fg_color="transparent",
+            text_color=("gray50", "gray60"),
+            justify="center",
         )
         self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
         # Optional native tk label fallback when CTkImage is unhappy
@@ -511,33 +519,23 @@ class ClipworkApp(_CTkBase):
     def _on_session_frame(self, img: Image.Image | None, t: float) -> None:
         if img is None:
             return
-        # Copy immediately; source buffer may be reused by OpenCV.
         try:
             frame = img.copy()
         except Exception:
             return
-        # Marshal to UI thread (Tk/CTk images must be created on main thread)
         self.after(0, lambda i=frame, tt=t: self._show_frame(i, tt))
 
     def _on_session_position(self, t: float) -> None:
         self.after(0, lambda: self._sync_scrub(t))
 
+    def _on_session_status(self, msg: str) -> None:
+        self.after(0, lambda m=msg: self._set_status(m))
+
     def _show_frame(self, img: Image.Image, t: float) -> None:
-        """Paint preview on the main thread only."""
-        import time as _time
-
-        now = _time.perf_counter() * 1000.0
-        if self._session.playing and (now - self._last_paint_ms) < _PREVIEW_MIN_INTERVAL_MS:
-            return
-        self._last_paint_ms = now
+        """Paint preview on the main thread only (letterboxed stage)."""
         try:
-            fitted = img.convert("RGB")
-            fitted.thumbnail(PREVIEW_MAX, Image.Resampling.LANCZOS)
-            w, h = int(fitted.size[0]), int(fitted.size[1])
-            if w < 1 or h < 1:
-                return
-
-            # Prefer CTkImage (required by CTkLabel). Separate copies for light/dark.
+            fitted = _fit_image(img, (PREVIEW_W, PREVIEW_H))
+            w, h = PREVIEW_W, PREVIEW_H
             try:
                 light = fitted
                 dark = fitted.copy()
@@ -549,14 +547,13 @@ class ClipworkApp(_CTkBase):
                 self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
                 return
             except Exception as ctk_exc:
-                # Fallback: classic tk Label + PhotoImage (never pass PhotoImage to CTkLabel)
                 try:
                     import tkinter as tk
                     from PIL import ImageTk
 
                     if self._tk_preview is None:
                         self._tk_preview = tk.Label(
-                            self.preview_frame, bg="#2b2b2b", borderwidth=0
+                            self.preview_frame, bg="#141418", borderwidth=0
                         )
                     photo = ImageTk.PhotoImage(fitted, master=self)
                     self._preview_photo = photo
@@ -564,9 +561,7 @@ class ClipworkApp(_CTkBase):
                     self.preview_label.place_forget()
                     self._tk_preview.place(relx=0.5, rely=0.5, anchor="center")
                 except Exception as tk_exc:
-                    self._log(
-                        f"Preview paint failed (CTk: {ctk_exc}; Tk: {tk_exc})"
-                    )
+                    self._log(f"Preview paint failed (CTk: {ctk_exc}; Tk: {tk_exc})")
                     self.preview_label.configure(
                         image=None,
                         text=f"Preview unavailable\n{type(ctk_exc).__name__}: {ctk_exc}",
