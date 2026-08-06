@@ -260,6 +260,7 @@ class ClipworkApp(_CTkBase):
         # Pack lower chrome first so the preview claims remaining height.
         self.queue_box = ctk.CTkTextbox(center, height=48)
         self.queue_box.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        # Placeholder text; kept in sync with _QUEUE_IDLE after each export
         self.queue_box.insert("1.0", "Batch queue appears here when exporting multiple files.\n")
         self.queue_box.configure(state="disabled")
         self._last_export_path: Path | None = None
@@ -1529,6 +1530,43 @@ class ClipworkApp(_CTkBase):
         self.queue_box.insert("1.0", text)
         self.queue_box.configure(state="disabled")
 
+    _QUEUE_IDLE = "Batch queue appears here when exporting multiple files.\n"
+
+    def _reset_export_chrome(
+        self,
+        *,
+        status: str = "Ready",
+        keep_open_folder: bool = False,
+    ) -> None:
+        """Clear export-only UI so the app feels ready for the next job.
+
+        Keeps project state: media list, preview, In/Out, tool settings.
+        """
+        self._busy = False
+        self._export_proc_active = False
+        self._last_prog_log_frac = -1.0
+        self._batch_queue_lines = []
+        try:
+            self.btn_cancel.configure(state="disabled")
+        except Exception:
+            pass
+        if keep_open_folder and self._last_export_path:
+            try:
+                self.btn_open_folder.configure(state="normal")
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_open_folder.configure(state="disabled")
+            except Exception:
+                pass
+            # Drop path only when we are fully clearing export residue
+            if not keep_open_folder:
+                self._last_export_path = None
+        self._set_progress(0.0, "Idle", to_log=False)
+        self._set_status(status)
+        self._set_queue_text(self._QUEUE_IDLE)
+
     # ── export ──────────────────────────────────────────────
     def _current_path(self) -> Path | None:
         if 0 <= self._selected_idx < len(self._files):
@@ -1750,20 +1788,22 @@ class ClipworkApp(_CTkBase):
         if batch:
             dest_folder = self._ask_output_folder()
             if dest_folder is None:
-                self._set_status("Export cancelled")
+                self._reset_export_chrome(status="Ready")
                 return
             dest: Path | None = dest_folder
         else:
             dest = self._ask_save_path(tool, src)
             if dest is None:
-                self._set_status("Export cancelled")
+                self._reset_export_chrome(status="Ready")
                 return
 
         self._busy = True
         self._export_proc_active = True
         self._last_prog_log_frac = -1.0
+        self._batch_queue_lines = []
         self.btn_cancel.configure(state="normal")
         self.btn_open_folder.configure(state="disabled")
+        self._last_export_path = None
         self._session.stop()
         self.btn_play.configure(text="Play")
         label = dest.name if dest else "…"
@@ -1781,7 +1821,10 @@ class ClipworkApp(_CTkBase):
                 f"({format_time(max(0, self._session.out_or_end - self._session.in_point))})"
             )
         self._log("  Preparing… (starting encoder)")
-        self._set_queue_text("Export running…\n" + (f"Batch: {len(self._files)} files\n" if batch else f"{label}\n"))
+        self._set_queue_text(
+            "Export running…\n"
+            + (f"Batch: {len(self._files)} files\n" if batch else f"{label}\n")
+        )
 
         def work() -> None:
             try:
@@ -2492,15 +2535,18 @@ class ClipworkApp(_CTkBase):
     def _export_done(
         self, ok: bool, lines: list[str], dest: Path | None = None
     ) -> None:
+        """Finish export: confirm once, then clear export chrome for the next task."""
         self._busy = False
         self._export_proc_active = False
-        self.btn_cancel.configure(state="disabled")
+        try:
+            self.btn_cancel.configure(state="disabled")
+        except Exception:
+            pass
+
+        path: Path | None = None
         if ok:
-            self._set_progress(1.0, "100% · done", to_log=True)
-            self._set_status("Done")
             self._log("Export complete.")
-            # Prefer concrete dest path for Open folder
-            path: Path | None = dest
+            path = dest
             for line in lines:
                 p = Path(line)
                 if p.exists():
@@ -2508,17 +2554,38 @@ class ClipworkApp(_CTkBase):
                     break
             self._last_export_path = path
             if path:
-                self.btn_open_folder.configure(state="normal")
-                self._log(f"  Open folder available for: {path}")
-        else:
-            cancelled = bool(lines and "Cancel" in lines[0])
-            self._set_status("Cancelled" if cancelled else "Export failed")
-            self._set_progress(0, "Cancelled" if cancelled else "Failed", to_log=True)
-            self._log("Export stopped." if cancelled else "Export failed.")
+                self._log(f"  Saved → {path}")
+            for line in lines:
+                self._log("  ✓ " + line)
+            # One-shot confirmation; then wipe transient export UI
+            summary = str(lines[0]) if lines else (str(path) if path else "done")
+            try:
+                messagebox.showinfo(__app_name__, f"Saved:\n{summary}")
+            except Exception:
+                pass
+            # Project stays loaded; export chrome returns to idle for the next job
+            self._reset_export_chrome(status="Ready", keep_open_folder=bool(path))
+            self._log("Ready for next export.")
+            return
+
+        cancelled = bool(lines and "Cancel" in (lines[0] or ""))
+        self._log("Export stopped." if cancelled else "Export failed.")
         for line in lines:
-            self._log(("  ✓ " if ok else "  ✗ ") + line)
-        if ok and lines:
-            messagebox.showinfo(__app_name__, f"Saved:\n{lines[0]}")
+            self._log("  ✗ " + line)
+        if cancelled:
+            try:
+                messagebox.showinfo(__app_name__, "Export cancelled.")
+            except Exception:
+                pass
+            self._reset_export_chrome(status="Ready")
+        else:
+            err = lines[0] if lines else "Unknown error"
+            try:
+                messagebox.showerror(__app_name__, f"Export failed:\n{err}")
+            except Exception:
+                pass
+            self._reset_export_chrome(status="Ready")
+        self._log("Ready for next export.")
 
     # ── dialogs ─────────────────────────────────────────────
     def _maybe_first_run(self) -> None:
