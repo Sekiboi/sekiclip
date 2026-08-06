@@ -282,11 +282,16 @@ class ClipworkApp(_CTkBase):
         self._build_tool_panels()
 
         ctk.CTkButton(
-            right, text="Export / Run", height=36, command=self._run, font=ctk.CTkFont(weight="bold")
+            right,
+            text="Export / Save as…",
+            height=36,
+            command=self._run,
+            font=ctk.CTkFont(weight="bold"),
         ).pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(
             right,
-            text="Trim uses In/Out from the timeline.\nPreview shows your scrub position.",
+            text="Export asks where to save the new file.\n"
+            "Trim uses In/Out from the timeline.",
             wraplength=270,
             justify="left",
             text_color=("gray40", "gray60"),
@@ -657,6 +662,146 @@ class ClipworkApp(_CTkBase):
         self.progress.set(max(0.0, min(1.0, frac)))
         self.progress_label.configure(text=label)
 
+    def _remember_output_dir(self, path: Path) -> None:
+        try:
+            data = app_prefs.load_prefs()
+            data["last_output_dir"] = str(path.parent)
+            app_prefs.save_prefs(data)
+        except Exception:
+            pass
+
+    def _export_defaults(self, tool: str, src: Path | None) -> tuple[str, str, list[tuple[str, str]]]:
+        """Return (initial_dir, suggested_name, filetypes) for the Save dialog."""
+        prefs = app_prefs.load_prefs()
+        last = str(prefs.get("last_output_dir") or "")
+        if src:
+            initial_dir = last if last and Path(last).is_dir() else str(src.parent)
+            stem = src.stem
+            ext = src.suffix.lower() or ".mp4"
+        else:
+            initial_dir = last if last and Path(last).is_dir() else str(Path.home())
+            stem = "export"
+            ext = ".mp4"
+
+        video_ft = [
+            ("MP4 video", "*.mp4"),
+            ("MKV video", "*.mkv"),
+            ("WebM video", "*.webm"),
+            ("MOV video", "*.mov"),
+            ("All files", "*.*"),
+        ]
+        audio_ft = [
+            ("MP3 audio", "*.mp3"),
+            ("WAV audio", "*.wav"),
+            ("M4A audio", "*.m4a"),
+            ("FLAC audio", "*.flac"),
+            ("OGG audio", "*.ogg"),
+            ("All files", "*.*"),
+        ]
+        image_ft = [
+            ("JPEG image", "*.jpg"),
+            ("PNG image", "*.png"),
+            ("WebP image", "*.webp"),
+            ("All files", "*.*"),
+        ]
+
+        if tool == "More" and self.var_more.get() == "concat":
+            return initial_dir, f"{stem}_concat.mp4", video_ft
+
+        assert src is not None
+        ext = src.suffix.lower()
+
+        if tool == "Trim":
+            return initial_dir, f"{stem}_trim{src.suffix or '.mp4'}", video_ft + audio_ft
+
+        if tool == "Convert":
+            fmt = (self.var_fmt.get() or "mp4").lower()
+            if fmt == "jpg":
+                fmt = "jpeg"
+            if fmt in ("png", "jpeg", "webp") or ext in IMAGE_EXTS:
+                f = fmt if fmt in ("png", "jpeg", "webp") else "png"
+                suf = ".jpg" if f == "jpeg" else f".{f}"
+                return initial_dir, f"{stem}_convert{suf}", image_ft
+            if fmt in ops.AUDIO_FORMATS or ext in AUDIO_EXTS:
+                f = fmt if fmt in ops.AUDIO_FORMATS else "mp3"
+                return initial_dir, f"{stem}_convert.{f}", audio_ft
+            f = fmt if fmt in ops.VIDEO_FORMATS else "mp4"
+            return initial_dir, f"{stem}_convert.{f}", video_ft
+
+        if tool == "Compress":
+            if ext in IMAGE_EXTS:
+                return initial_dir, f"{stem}_compress.jpg", image_ft
+            if ext in AUDIO_EXTS:
+                return initial_dir, f"{stem}_compress.mp3", audio_ft
+            return initial_dir, f"{stem}_compress.mp4", video_ft
+
+        if tool == "Audio":
+            act = self.var_audio_action.get()
+            fmt = (self.var_audio_fmt.get() or "mp3").lower()
+            if act == "extract":
+                return initial_dir, f"{stem}_audio.{fmt}", audio_ft
+            if act == "normalize":
+                return initial_dir, f"{stem}_norm.mp3", audio_ft
+            if act == "mono":
+                return initial_dir, f"{stem}_mono.mp3", audio_ft
+            if act == "compress":
+                return initial_dir, f"{stem}_compress.mp3", audio_ft
+            return initial_dir, f"{stem}_convert.{fmt}", audio_ft
+
+        if tool == "Image":
+            act = self.var_image_action.get()
+            if act == "to_pdf":
+                return initial_dir, f"{stem}.pdf", [("PDF", "*.pdf"), ("All files", "*.*")]
+            if act == "compress":
+                return initial_dir, f"{stem}_compress.jpg", image_ft
+            if act == "convert":
+                return initial_dir, f"{stem}_convert.png", image_ft
+            if act == "resize":
+                return initial_dir, f"{stem}_resize{src.suffix or '.png'}", image_ft
+            if act == "rotate":
+                return initial_dir, f"{stem}_rot{src.suffix or '.png'}", image_ft
+            if act == "flip":
+                return initial_dir, f"{stem}_flip{src.suffix or '.png'}", image_ft
+            if act == "strip_exif":
+                return initial_dir, f"{stem}_noexif{src.suffix or '.jpg'}", image_ft
+            return initial_dir, f"{stem}_edit{src.suffix or '.png'}", image_ft
+
+        more = self.var_more.get()
+        if more == "remux":
+            return initial_dir, f"{stem}_remux.mp4", video_ft
+        if more == "strip_audio":
+            return initial_dir, f"{stem}_silent.mp4", video_ft
+        if more == "frame":
+            return initial_dir, f"{stem}_frame.jpg", image_ft
+        if more == "rotate_video":
+            return initial_dir, f"{stem}_rot.mp4", video_ft
+        return initial_dir, f"{stem}_export{src.suffix or '.mp4'}", video_ft + audio_ft + image_ft
+
+    def _ask_save_path(self, tool: str, src: Path | None) -> Path | None:
+        """Show Save As dialog. Returns None if cancelled."""
+        initial_dir, name, filetypes = self._export_defaults(tool, src)
+        # Default extension from suggested name
+        def_ext = Path(name).suffix or ".mp4"
+        path_str = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save exported file as…",
+            initialdir=initial_dir,
+            initialfile=name,
+            defaultextension=def_ext,
+            filetypes=filetypes,
+        )
+        if not path_str:
+            return None
+        dest = Path(path_str)
+        # Ensure parent exists
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(__app_name__, f"Cannot create folder:\n{exc}")
+            return None
+        self._remember_output_dir(dest)
+        return dest
+
     def _run(self) -> None:
         if self._busy:
             return
@@ -672,37 +817,48 @@ class ClipworkApp(_CTkBase):
             return
 
         if tool != "Image" and not ops.find_ffmpeg():
-            # Image-only tools can run without ffmpeg
             if tool not in ("Image",) and not (
                 src and src.suffix.lower() in IMAGE_EXTS and tool in ("Convert", "Compress")
             ):
                 messagebox.showerror(__app_name__, "ffmpeg not found (required for video/audio).")
                 return
 
+        dest = self._ask_save_path(tool, src)
+        if dest is None:
+            self._set_status("Export cancelled")
+            return
+
         self._busy = True
         self._session.stop()
         self.btn_play.configure(text="Play")
-        self._set_status("Exporting…")
+        self._set_status(f"Exporting to {dest.name}…")
         self._set_progress(0.02, "Starting…")
 
         def work() -> None:
             try:
-                lines = self._export_worker(tool, src)
+                lines = self._export_worker(tool, src, dest)
                 self.after(0, lambda: self._export_done(True, lines))
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: self._export_done(False, [str(exc)]))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _export_worker(self, tool: str, src: Path | None) -> list[str]:
+    def _export_worker(self, tool: str, src: Path | None, dest: Path) -> list[str]:
         results: list[str] = []
 
         def prog(frac: float, label: str) -> None:
             self.after(0, lambda: self._set_progress(frac, label))
 
+        # User picked this path (Save dialog already confirms overwrite on Windows).
+        # Remove existing file so ops unique_path() does not invent _1 suffixes.
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError as exc:
+                raise RuntimeError(f"Cannot overwrite {dest.name}: {exc}") from exc
+
         if tool == "More" and self.var_more.get() == "concat":
             vids = [p for p in self._files if p.suffix.lower() in VIDEO_EXTS]
-            dest = vids[0].with_name(vids[0].stem + "_concat.mp4")
             jr = jobs.run_job(
                 "concat",
                 lambda: ops.concat_videos(vids, dest, reencode=True),
@@ -711,7 +867,7 @@ class ClipworkApp(_CTkBase):
             if not jr.ok:
                 raise RuntimeError(jr.error)
             prog(1.0, "Done")
-            return [str(jr.paths[0])]
+            return [str(jr.paths[0] if jr.paths else dest)]
 
         assert src is not None
         ext = src.suffix.lower()
@@ -723,10 +879,8 @@ class ClipworkApp(_CTkBase):
             if end and end > start:
                 dur = end - start
             reenc = bool(self.var_reencode.get())
-            from clipwork.media_ops.ffmpeg_util import default_output
-
-            suffix = src.suffix or ".mp4"
-            out_path = default_output(src, suffix, "trim")
+            out_path = dest
+            suffix = dest.suffix or src.suffix or ".mp4"
             if reenc and ops.find_ffmpeg():
                 args = ["-ss", str(start), "-i", str(src)]
                 if dur:
@@ -765,59 +919,82 @@ class ClipworkApp(_CTkBase):
             results.append(str(out_path if out_path.is_file() else jr.paths[0]))
             return results
 
-        # Non-trim tools (use selected file)
         def go(name: str, fn):  # type: ignore[no-untyped-def]
             jr = jobs.run_job(name, fn, inputs=[src])
             if not jr.ok:
                 raise RuntimeError(jr.error or name)
             prog(1.0, "Done")
-            return [str(p) for p in jr.paths]
+            return [str(p) for p in jr.paths] if jr.paths else [str(dest)]
 
         if tool == "Convert":
             fmt = self.var_fmt.get()
-            if ext in IMAGE_EXTS or fmt in ("png", "jpg", "webp"):
-                f = fmt if fmt in ("png", "jpg", "webp") else "png"
-                return go("convert_image", lambda: ops.convert_image(src, fmt=f))
-            if ext in AUDIO_EXTS or fmt in ops.AUDIO_FORMATS:
-                f = fmt if fmt in ops.AUDIO_FORMATS else "mp3"
-                return go("convert_audio", lambda: ops.convert_audio(src, fmt=f))
-            f = fmt if fmt in ops.VIDEO_FORMATS else "mp4"
-            return go("convert_video", lambda: ops.convert_video(src, fmt=f))
+            # Prefer extension from chosen save path when it matches a known format
+            dest_fmt = dest.suffix.lstrip(".").lower()
+            if dest_fmt == "jpg":
+                dest_fmt = "jpeg"
+            if ext in IMAGE_EXTS or dest_fmt in ("png", "jpeg", "webp") or fmt in ("png", "jpg", "webp"):
+                f = dest_fmt if dest_fmt in ("png", "jpeg", "webp") else (
+                    fmt if fmt in ("png", "jpg", "webp") else "png"
+                )
+                if f == "jpg":
+                    f = "jpeg"
+                return go("convert_image", lambda: ops.convert_image(src, dest, fmt=f))
+            if ext in AUDIO_EXTS or dest_fmt in ops.AUDIO_FORMATS or fmt in ops.AUDIO_FORMATS:
+                f = dest_fmt if dest_fmt in ops.AUDIO_FORMATS else (
+                    fmt if fmt in ops.AUDIO_FORMATS else "mp3"
+                )
+                return go("convert_audio", lambda: ops.convert_audio(src, dest, fmt=f))
+            f = dest_fmt if dest_fmt in ops.VIDEO_FORMATS else (
+                fmt if fmt in ops.VIDEO_FORMATS else "mp4"
+            )
+            return go("convert_video", lambda: ops.convert_video(src, dest, fmt=f))
 
         if tool == "Compress":
-            if ext in IMAGE_EXTS:
+            if ext in IMAGE_EXTS or dest.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
                 return go(
                     "compress_image",
                     lambda: ops.compress_image(
                         src,
+                        dest,
                         quality=int(self.var_quality.get() or 75),
                         max_edge=int(self.var_max_edge.get() or 1920),
                     ),
                 )
-            if ext in AUDIO_EXTS:
+            if ext in AUDIO_EXTS or dest.suffix.lower() in {".mp3", ".m4a", ".wav", ".ogg", ".flac"}:
                 return go(
                     "compress_audio",
-                    lambda: ops.compress_audio(src, bitrate=self.var_bitrate.get() or "128k"),
+                    lambda: ops.compress_audio(
+                        src, dest, bitrate=self.var_bitrate.get() or "128k"
+                    ),
                 )
             return go(
                 "compress_video",
-                lambda: ops.compress_video(src, preset=self.var_preset.get() or "balanced"),
+                lambda: ops.compress_video(
+                    src, dest, preset=self.var_preset.get() or "balanced"
+                ),
             )
 
         if tool == "Audio":
             act = self.var_audio_action.get()
             fmt = self.var_audio_fmt.get() or "mp3"
+            dest_fmt = dest.suffix.lstrip(".").lower() or fmt
             if act == "extract":
-                return go("extract_audio", lambda: ops.extract_audio(src, fmt=fmt))
+                return go(
+                    "extract_audio",
+                    lambda: ops.extract_audio(src, dest, fmt=dest_fmt if dest_fmt in ops.AUDIO_FORMATS else fmt),
+                )
             if act == "convert":
-                return go("convert_audio", lambda: ops.convert_audio(src, fmt=fmt))
+                return go(
+                    "convert_audio",
+                    lambda: ops.convert_audio(src, dest, fmt=dest_fmt if dest_fmt in ops.AUDIO_FORMATS else fmt),
+                )
             if act == "normalize":
-                return go("normalize", lambda: ops.normalize_audio(src))
+                return go("normalize", lambda: ops.normalize_audio(src, dest))
             if act == "mono":
-                return go("mono", lambda: ops.to_mono(src))
+                return go("mono", lambda: ops.to_mono(src, dest))
             return go(
                 "compress_audio",
-                lambda: ops.compress_audio(src, bitrate=self.var_bitrate.get() or "128k"),
+                lambda: ops.compress_audio(src, dest, bitrate=self.var_bitrate.get() or "128k"),
             )
 
         if tool == "Image":
@@ -827,6 +1004,7 @@ class ClipworkApp(_CTkBase):
                     "compress_image",
                     lambda: ops.compress_image(
                         src,
+                        dest,
                         quality=int(self.var_quality.get() or 75),
                         max_edge=int(self.var_max_edge.get() or 1920),
                     ),
@@ -834,33 +1012,43 @@ class ClipworkApp(_CTkBase):
             if act == "resize":
                 return go(
                     "resize",
-                    lambda: ops.resize_image(src, max_edge=int(self.var_max_edge.get() or 1920)),
+                    lambda: ops.resize_image(
+                        src, dest, max_edge=int(self.var_max_edge.get() or 1920)
+                    ),
                 )
             if act == "convert":
-                return go("convert_image", lambda: ops.convert_image(src, fmt="png"))
+                f = dest.suffix.lstrip(".").lower() or "png"
+                if f == "jpg":
+                    f = "jpeg"
+                return go("convert_image", lambda: ops.convert_image(src, dest, fmt=f if f in ("png", "jpeg", "webp") else "png"))
             if act == "rotate":
                 return go(
                     "rotate_image",
-                    lambda: ops.rotate_image(src, degrees=int(self.var_degrees.get() or 90)),
+                    lambda: ops.rotate_image(
+                        src, dest, degrees=int(self.var_degrees.get() or 90)
+                    ),
                 )
             if act == "flip":
-                return go("flip", lambda: ops.flip_image(src))
+                return go("flip", lambda: ops.flip_image(src, dest))
             if act == "strip_exif":
-                return go("strip_exif", lambda: ops.strip_exif(src))
-            return go("images_to_pdf", lambda: ops.images_to_pdf([src], src.with_suffix(".pdf")))
+                return go("strip_exif", lambda: ops.strip_exif(src, dest))
+            return go("images_to_pdf", lambda: ops.images_to_pdf([src], dest))
 
         more = self.var_more.get()
         if more == "remux":
-            return go("remux", lambda: ops.remux(src, fmt="mp4"))
+            f = dest.suffix.lstrip(".").lower() or "mp4"
+            return go("remux", lambda: ops.remux(src, dest, fmt=f if f in ops.VIDEO_FORMATS else "mp4"))
         if more == "strip_audio":
-            return go("strip_audio", lambda: ops.strip_audio(src))
+            return go("strip_audio", lambda: ops.strip_audio(src, dest))
         if more == "frame":
             t = self._session.position
-            return go("frame", lambda: ops.grab_frame(src, time=t))
+            return go("frame", lambda: ops.grab_frame(src, dest, time=t))
         if more == "rotate_video":
             return go(
                 "rotate_video",
-                lambda: ops.rotate_video(src, degrees=int(self.var_degrees.get() or 90)),
+                lambda: ops.rotate_video(
+                    src, dest, degrees=int(self.var_degrees.get() or 90)
+                ),
             )
         raise RuntimeError(f"Unknown action: {more}")
 
