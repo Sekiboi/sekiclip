@@ -24,7 +24,7 @@ from clipwork.media_ops.ffmpeg_util import (
     request_cancel,
     staging_path,
 )
-from clipwork.preview_match import active_subs, fade_strength, load_srt_cached
+from clipwork.preview_match import active_subs, fade_strength, fit_fades, load_srt_cached
 from clipwork.media_preview import (
     MediaSession,
     format_time,
@@ -1261,9 +1261,10 @@ class ClipworkApp(_CTkBase):
             except Exception:
                 pass
 
-        # Video fades (same clamp math as export)
+        # Video fades: start exactly N seconds before Out (fit_fades never expands N)
         vfi = float(look["video_fade_in"])
         vfo = float(look["video_fade_out"])
+        vfi_fit, vfo_fit = fit_fades(sel_dur, vfi, vfo)
         strength = 0.0
         if not outside:
             strength = fade_strength(t_rel, sel_dur, vfi, vfo)
@@ -1299,6 +1300,14 @@ class ClipworkApp(_CTkBase):
                 badges.append(f"A-fade {afi:g}/{afo:g}s")
             if vfi > 0 or vfo > 0:
                 badges.append(f"V-fade {vfi:g}/{vfo:g}s")
+            if vfo_fit > 0 and not outside:
+                # When fade-out actually begins (absolute source time)
+                fade_start_abs = inn + (sel_dur - vfo_fit)
+                if t + 0.05 >= fade_start_abs:
+                    left = max(0.0, outp - t)
+                    badges.append(f"OUT {left:.1f}s left")
+                else:
+                    badges.append(f"out@{format_time(fade_start_abs)}")
             if strength > 0.05 and not outside:
                 badges.append("FADING")
             if look.get("use_subs"):

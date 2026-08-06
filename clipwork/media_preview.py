@@ -448,11 +448,20 @@ class MediaSession:
         return self._playing
 
     def frame_step(self, delta: int = 1) -> float:
-        """Step playhead by N frames (paused). Returns new time."""
+        """Step playhead by N frames (always pauses). Returns new time."""
+        was = self._playing
         self.stop()
         fps = max(self._fps, 1.0)
         t = self.position + (delta / fps)
+        # Stay inside media; do not jump past duration
+        if self.duration > 0:
+            t = max(0.0, min(t, self.duration))
         self.seek(t, emit=True)
+        if was and self.on_status:
+            try:
+                self.on_status("Paused")
+            except Exception:
+                pass
         return self.position
 
     def play(self, *, selection_only: bool = False, loop: bool = False) -> None:
@@ -564,21 +573,24 @@ class MediaSession:
         outp = float(self.out_or_end) if self.out_or_end > 0 else end
         sel_src = max(0.05, outp - inn)
         out_sel = sel_src / speed
-        max_each = max(0.05, out_sel * 0.49)
 
-        afi = max(0.0, float(self.preview_audio_fade_in))
-        afo = max(0.0, float(self.preview_audio_fade_out))
+        from clipwork.preview_match import fit_fades
+
+        afi_raw = max(0.0, float(self.preview_audio_fade_in))
+        afo_raw = max(0.0, float(self.preview_audio_fade_out))
+        # Fades sized on full selection output length (export), then mapped into this window
+        afi, afo = fit_fades(out_sel, afi_raw, afo_raw)
         out_off = max(0.0, (start - inn) / speed) if start >= inn - 1e-6 else 0.0
 
         if afi > 0 and start <= inn + 0.05:
-            d = min(afi, max_each, out_len * 0.98)
+            d = min(afi, out_len * 0.98)
             if d > 0.02:
                 parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=tri")
 
         if afo > 0 and end >= outp - 0.05:
-            # Exact UI value (e.g. 1.0s), only capped by selection length
-            d = min(afo, max_each, out_len * 0.98)
-            st = (out_sel - d) - out_off
+            # Fade-out starts exactly `afo` output-seconds before selection Out
+            d = min(afo, out_len * 0.98)
+            st = (out_sel - d) - out_off  # relative to this play window
             if d > 0.02:
                 if st >= out_len - 0.02:
                     pass
@@ -654,16 +666,26 @@ class MediaSession:
         self.play(selection_only=sel, loop=do_loop)
 
     def _play_loop(self, gen: int, start_at: float, end_at: float) -> None:
-        """Clock-driven playback: sequential video frames + synced audio (respects speed)."""
+        """Wall-clock master playback: fades/stop use stable timeline (not OpenCV MSEC).
+
+        OpenCV's CAP_PROP_POS_MSEC often runs ahead/behind real time, which made
+        fade-out appear 10–15s early and stop feel wrong. We drive playhead from
+        wall clock; video frames follow the playhead.
+        """
         self._play_start_at = start_at
         self._play_end_at = end_at
+        # Clamp end to real duration so we never "play" past the file
+        if self.duration > 0 and end_at < 1e8:
+            end_at = min(end_at, self.duration)
         audio_ok = self._start_audio(start_at, end_at if end_at < 1e8 else None)
         if not audio_ok and self.info and self.info.has_audio:
             self._status("Playing without sound (ffplay not found — use a full ffmpeg build)")
 
         wall0 = time.perf_counter()
         fps = max(self._fps, 1.0)
-        speed = max(0.25, min(4.0, float(self.preview_speed)))
+        last_img: Image.Image | None = None
+        last_emit = 0.0
+
         # Resync capture to start
         with self._lock:
             if self._cap is not None:
@@ -675,23 +697,19 @@ class MediaSession:
                 except Exception:
                     pass
 
-        last_emit = 0.0
-        min_emit_dt = 1.0 / min(fps * max(speed, 1.0), 60.0)
-
         while self._playing and gen == self._play_gen:
-            # Re-read speed so live UI changes apply (matches export)
             speed = max(0.25, min(4.0, float(self.preview_speed)))
-            elapsed = (time.perf_counter() - wall0) * speed
-            target = start_at + elapsed
-            if target >= end_at:
+            # Authoritative media time (source timeline)
+            target = start_at + (time.perf_counter() - wall0) * speed
+            if target >= end_at - 1e-4:
                 if self._loop_selection and gen == self._play_gen:
                     start_at = self.in_point
                     end_at = self.out_or_end if self.out_or_end > 0 else self.duration
+                    if self.duration > 0:
+                        end_at = min(end_at, self.duration)
                     self._play_start_at = start_at
                     self._play_end_at = end_at
                     wall0 = time.perf_counter()
-                    self.seek(start_at, emit=False)
-                    self._start_audio(start_at, end_at if end_at < 1e8 else None)
                     with self._lock:
                         if self._cap is not None:
                             try:
@@ -701,13 +719,21 @@ class MediaSession:
                                 self._cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
                             except Exception:
                                 pass
+                    self._start_audio(start_at, end_at if end_at < 1e8 else None)
                     continue
-                self.position = end_at if end_at < 1e9 else self.position
+                # Natural end of selection/file — after full fade-out has played
+                self.position = min(end_at, self.duration) if self.duration > 0 else end_at
                 try:
-                    self.seek(self.position, emit=True)
+                    if last_img is not None:
+                        self._emit_frame(last_img, self.position)
+                    else:
+                        self.seek(self.position, emit=True)
                 except Exception:
                     pass
                 break
+
+            # Playhead for UI + fade math = wall target (never runaway OpenCV time)
+            self.position = target
 
             img = None
             with self._lock:
@@ -715,50 +741,48 @@ class MediaSession:
                     try:
                         import cv2
 
-                        # Drop frames until we reach target (smooth catch-up)
+                        # Advance decode toward target; do not trust cap time for UI
                         guard = 0
-                        while guard < 90:
+                        while guard < 120:
                             cap_t = self._cap_time()
-                            if cap_t >= target - (0.5 / fps):
+                            # If decoder is ahead of master clock, stop reading
+                            if cap_t >= target - (0.75 / fps):
                                 break
                             ok, frame = self._cap.read()
                             guard += 1
                             if not ok:
                                 break
                             img = self._frame_to_image(frame)
-                            self.position = self._cap_time()
-                        # If we didn't advance enough, still try one read when behind display
-                        if img is None:
+                            last_img = img
+                        if img is None and last_img is None:
                             ok, frame = self._cap.read()
                             if ok:
                                 img = self._frame_to_image(frame)
-                                self.position = self._cap_time()
-                            else:
-                                # stuck at end
-                                self.position = target
+                                last_img = img
+                        if img is None:
+                            img = last_img
                     except Exception:
-                        self.position = target
+                        img = last_img
                 else:
-                    # Audio-only: advance playhead by clock
-                    self.position = target
                     img = self._waveform_frame_at(target)
+                    last_img = img
 
             now = time.perf_counter()
+            min_emit_dt = 1.0 / min(fps * max(speed, 1.0), 60.0)
             if img is not None and (now - last_emit) >= min_emit_dt:
-                self._emit_frame(img, self.position)
+                # Emit with wall-clock time so fade-out starts exactly N seconds before end
+                self._emit_frame(img, target)
                 last_emit = now
-            elif img is None and self._cap is None:
-                if (now - last_emit) >= min_emit_dt:
-                    self._emit_frame(self._waveform_frame_at(self.position), self.position)
-                    last_emit = now
+                if self.on_position:
+                    try:
+                        self.on_position(target)
+                    except Exception:
+                        pass
 
-            # Sleep until next frame boundary
-            next_t = start_at + (time.perf_counter() - wall0) + (1.0 / fps)
-            sleep_for = (next_t - start_at) - (time.perf_counter() - wall0)
-            # simpler: sleep a fraction of frame time
-            time.sleep(max(0.001, min(0.05, 0.5 / fps)))
+            time.sleep(max(0.001, min(0.02, 0.4 / fps)))
 
         self._stop_audio()
+        self._playing = False
         if gen == self._play_gen:
             self._playing = False
             if self.on_position:

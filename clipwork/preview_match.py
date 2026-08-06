@@ -99,21 +99,43 @@ def load_srt_cached(path: Path | str | None) -> list[tuple[float, float, str]]:
     return cues
 
 
+def fit_fades(sel_dur: float, fade_in: float, fade_out: float) -> tuple[float, float]:
+    """Return (fade_in, fade_out) in seconds on the selection timeline.
+
+    User values are honored exactly. Only if in+out would exceed the cut length
+    are both scaled down proportionally (never *expanded*).
+    """
+    sel_dur = max(0.05, float(sel_dur))
+    vfi = max(0.0, float(fade_in))
+    vfo = max(0.0, float(fade_out))
+    total = vfi + vfo
+    if total > sel_dur * 0.98 and total > 1e-6:
+        scale = (sel_dur * 0.98) / total
+        vfi *= scale
+        vfo *= scale
+    return vfi, vfo
+
+
 def fade_strength(
     t_rel: float,
     sel_dur: float,
     fade_in: float,
     fade_out: float,
 ) -> float:
-    """0 = full picture, 1 = black. Same clamp as export (each ≤ 49% of selection)."""
+    """0 = full picture, 1 = black.
+
+    Fade-out starts at exactly (sel_dur - fade_out) — i.e. N seconds before Out —
+    and reaches full black at Out. Same for export and preview.
+    """
     sel_dur = max(0.05, float(sel_dur))
-    max_each = max(0.05, sel_dur * 0.49)
-    vfi = min(max(0.0, float(fade_in)), max_each) if fade_in > 0 else 0.0
-    vfo = min(max(0.0, float(fade_out)), max_each) if fade_out > 0 else 0.0
+    t_rel = float(t_rel)
+    vfi, vfo = fit_fades(sel_dur, fade_in, fade_out)
     strength = 0.0
-    if vfi > 0 and t_rel < vfi:
-        strength = max(strength, 1.0 - max(0.0, min(1.0, t_rel / max(vfi, 1e-6))))
-    if vfo > 0 and t_rel > sel_dur - vfo:
+    if vfi > 1e-6 and t_rel < vfi:
+        # t_rel=0 → black; t_rel=vfi → clear
+        strength = max(strength, 1.0 - max(0.0, min(1.0, t_rel / vfi)))
+    if vfo > 1e-6 and t_rel > sel_dur - vfo:
+        # t_rel = sel_dur - vfo → clear; t_rel = sel_dur → black
         into = t_rel - (sel_dur - vfo)
-        strength = max(strength, max(0.0, min(1.0, into / max(vfo, 1e-6))))
+        strength = max(strength, max(0.0, min(1.0, into / vfo)))
     return strength
