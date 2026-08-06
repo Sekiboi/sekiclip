@@ -39,10 +39,12 @@ except ImportError:
     TkinterDnD = None  # type: ignore
 
 APP_USER_MODEL_ID = "Sekiboi.Clipwork"
-MIN_W, MIN_H = 1100, 720
-# Fixed preview stage (16:9). Frames letterbox into this for stable framing.
+# Comfortable floor for laptops; panes remain usable below classic 1100×720.
+MIN_W, MIN_H = 960, 600
+# Default / fallback preview stage (16:9). Actual stage follows the resizable pane.
 PREVIEW_W, PREVIEW_H = 960, 540
 PREVIEW_MAX = (PREVIEW_W, PREVIEW_H)
+PREVIEW_MIN = (320, 180)
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".mpeg", ".mpg"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus"}
@@ -114,12 +116,16 @@ class ClipworkApp(_CTkBase):
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
             except Exception:
                 pass
-        ctk.set_appearance_mode("System")
+        self._prefs = app_prefs.load_prefs()
+        appearance = str(self._prefs.get("appearance_mode") or "System")
+        ctk.set_appearance_mode(appearance)
         ctk.set_default_color_theme("blue")
         super().__init__()
         self.title(f"{__app_name__} {__version__}")
         self.minsize(MIN_W, MIN_H)
-        self.geometry("1280x860")
+        self.resizable(True, True)
+        # Fallback size before prefs restore (never open as a stamp-sized window)
+        self.geometry(app_prefs.DEFAULT_GEOMETRY)
 
         self._files: list[Path] = []
         self._selected_idx: int = -1
@@ -129,6 +135,9 @@ class ClipworkApp(_CTkBase):
         self._session.on_position = self._on_session_position
         self._session.on_status = self._on_session_status
         self._preview_photo = None  # keep ref (CTkImage or PhotoImage)
+        self._preview_size = (PREVIEW_W, PREVIEW_H)
+        self._last_frame_img: Image.Image | None = None
+        self._preview_resize_job: str | None = None
         self._scrub_dragging = False
         self._updating_scrub = False
         self._export_proc_active = False
@@ -138,15 +147,21 @@ class ClipworkApp(_CTkBase):
         self._logo_ghost = False
         self._updating_time_fields = False
         self._batch_queue_lines: list[str] = []
+        self._layout_ready = False
 
         self._build()
         self._set_icons()
         self._bind_keys()
+        self._restore_window_state()
         self.after(200, self._maybe_first_run)
         self._refresh_ffmpeg_status()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self) -> None:
+        try:
+            self._save_window_state()
+        except Exception:
+            pass
         self._session.close()
         self.destroy()
 
@@ -159,9 +174,23 @@ class ClipworkApp(_CTkBase):
             pass
 
     # ── layout ──────────────────────────────────────────────
+    def _sash_bg(self) -> str:
+        """Sash color that reads as a grip without fighting the theme."""
+        try:
+            mode = ctk.get_appearance_mode()
+        except Exception:
+            mode = "Dark"
+        return "#2a2a2e" if mode == "Dark" else "#c8c8ce"
+
     def _build(self) -> None:
+        prefs = self._prefs
+        left_w = int(prefs.get("left_pane_w") or app_prefs.DEFAULT_LEFT_W)
+        right_w = int(prefs.get("right_pane_w") or app_prefs.DEFAULT_RIGHT_W)
+        log_h = int(prefs.get("log_pane_h") or app_prefs.DEFAULT_LOG_H)
+
+        # Header (fixed height)
         top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=14, pady=(10, 4))
+        top.pack(fill="x", padx=14, pady=(10, 2))
         ctk.CTkLabel(top, text=__app_name__, font=ctk.CTkFont(size=20, weight="bold")).pack(
             side="left"
         )
@@ -173,17 +202,52 @@ class ClipworkApp(_CTkBase):
         self.ff_label = ctk.CTkLabel(top, text="", text_color=("gray40", "gray60"))
         self.ff_label.pack(side="right")
 
-        main = ctk.CTkFrame(self, fg_color="transparent")
-        main.pack(fill="both", expand=True, padx=12, pady=4)
+        # Vertical split: work area | status/log (user-draggable)
+        sash_bg = self._sash_bg()
+        self._vpaned = tk.PanedWindow(
+            self,
+            orient=tk.VERTICAL,
+            sashwidth=6,
+            sashrelief=tk.FLAT,
+            bd=0,
+            bg=sash_bg,
+            opaqueresize=True,
+        )
+        self._vpaned.pack(fill="both", expand=True, padx=10, pady=(2, 8))
 
-        # Left: file list
-        left = ctk.CTkFrame(main, width=220)
-        left.pack(side="left", fill="y", padx=(0, 8))
-        left.pack_propagate(False)
+        work = ctk.CTkFrame(self._vpaned, fg_color="transparent")
+        bottom = ctk.CTkFrame(self._vpaned, fg_color="transparent")
+        self._vpaned.add(work, stretch="always", minsize=280)
+        self._vpaned.add(bottom, stretch="never", minsize=72)
+        self._bottom_pane = bottom
+
+        # Horizontal split: media | preview | tools
+        self._hpaned = tk.PanedWindow(
+            work,
+            orient=tk.HORIZONTAL,
+            sashwidth=6,
+            sashrelief=tk.FLAT,
+            bd=0,
+            bg=sash_bg,
+            opaqueresize=True,
+        )
+        self._hpaned.pack(fill="both", expand=True)
+
+        left = ctk.CTkFrame(self._hpaned, width=left_w)
+        center = ctk.CTkFrame(self._hpaned)
+        right = ctk.CTkFrame(self._hpaned, width=right_w)
+        self._left_pane = left
+        self._center_pane = center
+        self._right_pane = right
+        self._hpaned.add(left, stretch="never", minsize=140)
+        self._hpaned.add(center, stretch="always", minsize=360)
+        self._hpaned.add(right, stretch="never", minsize=220)
+
+        # ── Left: media list ──
         ctk.CTkLabel(left, text="Media", font=ctk.CTkFont(weight="bold")).pack(
             anchor="w", padx=8, pady=(8, 4)
         )
-        self.file_list = ctk.CTkScrollableFrame(left, width=200)
+        self.file_list = ctk.CTkScrollableFrame(left)
         self.file_list.pack(fill="both", expand=True, padx=6, pady=4)
         self._file_buttons: list[ctk.CTkButton] = []
 
@@ -192,66 +256,70 @@ class ClipworkApp(_CTkBase):
         ctk.CTkButton(lb, text="Add…", width=70, command=self._add_files).pack(side="left", padx=2)
         ctk.CTkButton(lb, text="Clear", width=60, command=self._clear_files).pack(side="left", padx=2)
 
-        # Center: preview + timeline
-        center = ctk.CTkFrame(main)
-        center.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        # ── Center: expandable preview + fixed chrome below ──
+        # Pack lower chrome first so the preview claims remaining height.
+        self.queue_box = ctk.CTkTextbox(center, height=48)
+        self.queue_box.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        self.queue_box.insert("1.0", "Batch queue appears here when exporting multiple files.\n")
+        self.queue_box.configure(state="disabled")
+        self._last_export_path: Path | None = None
 
-        self.preview_frame = ctk.CTkFrame(
-            center, width=PREVIEW_W, height=PREVIEW_H, fg_color=("#1a1a1e", "#141418")
+        prog_fr = ctk.CTkFrame(center, fg_color="transparent")
+        prog_fr.pack(side="bottom", fill="x", padx=10, pady=(0, 2))
+        prow = ctk.CTkFrame(prog_fr, fg_color="transparent")
+        prow.pack(fill="x")
+        ctk.CTkLabel(prow, text="Export progress").pack(side="left")
+        self.btn_cancel = ctk.CTkButton(
+            prow, text="Cancel", width=70, command=self._cancel_export, state="disabled"
         )
-        self.preview_frame.pack(padx=10, pady=(10, 6))
-        self.preview_frame.pack_propagate(False)
-        self.preview_label = ctk.CTkLabel(
-            self.preview_frame,
-            text="Add a video, audio, or image file to preview\n"
-            "Play includes sound once audio preview is ready",
-            fg_color="transparent",
-            text_color=("gray50", "gray60"),
-            justify="center",
+        self.btn_cancel.pack(side="right")
+        self.btn_open_folder = ctk.CTkButton(
+            prow, text="Open folder", width=90, command=self._open_last_folder, state="disabled"
         )
-        self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
-        # Optional native tk label fallback when CTkImage is unhappy
-        self._tk_preview = None
-        # Crop drag on preview
-        self.preview_label.bind("<ButtonPress-1>", self._crop_press)
-        self.preview_label.bind("<B1-Motion>", self._crop_motion)
-        self.preview_label.bind("<ButtonRelease-1>", self._crop_release)
-        if _HAS_DND:
-            try:
-                self.preview_frame.drop_target_register(DND_FILES)
-                self.preview_frame.dnd_bind("<<Drop>>", self._on_drop)
-            except Exception:
-                pass
+        self.btn_open_folder.pack(side="right", padx=4)
+        self.progress = ctk.CTkProgressBar(prog_fr)
+        self.progress.set(0)
+        self.progress.pack(fill="x", pady=2)
+        self.progress_label = ctk.CTkLabel(prog_fr, text="Idle", anchor="w")
+        self.progress_label.pack(fill="x")
 
-        self.info_line = ctk.CTkLabel(center, text="", anchor="w", text_color=("gray30", "gray70"))
-        self.info_line.pack(fill="x", padx=12)
+        self.range_label = ctk.CTkLabel(
+            center,
+            text="Space=play  I/O=marks  ←/→=frame  Drag handles · Drag sashes to resize panes",
+            text_color=("gray40", "gray60"),
+            anchor="w",
+        )
+        self.range_label.pack(side="bottom", fill="x", padx=10, pady=(0, 2))
 
-        # Transport
-        transport = ctk.CTkFrame(center, fg_color="transparent")
-        transport.pack(fill="x", padx=10, pady=4)
-        self.btn_play = ctk.CTkButton(transport, text="Play", width=64, command=self._toggle_play)
-        self.btn_play.pack(side="left", padx=2)
-        ctk.CTkButton(transport, text="Stop", width=54, command=self._stop).pack(side="left", padx=2)
-        ctk.CTkButton(transport, text="|◀", width=40, command=lambda: self._frame_step(-1)).pack(
-            side="left", padx=1
+        scrub_fr = ctk.CTkFrame(center, fg_color="transparent")
+        scrub_fr.pack(side="bottom", fill="x", padx=10, pady=(2, 2))
+        tl_row = ctk.CTkFrame(scrub_fr, fg_color="transparent")
+        tl_row.pack(fill="x")
+        ctk.CTkLabel(tl_row, text="Timeline — green=In, red=Out, yellow=playhead").pack(
+            side="left"
         )
-        ctk.CTkButton(transport, text="▶|", width=40, command=lambda: self._frame_step(1)).pack(
-            side="left", padx=1
+        ctk.CTkButton(tl_row, text="−", width=32, command=lambda: self._zoom(1.4)).pack(
+            side="right", padx=2
         )
-        ctk.CTkButton(
-            transport, text="Play sel.", width=72, command=self._play_selection
-        ).pack(side="left", padx=2)
-        self.time_label = ctk.CTkLabel(transport, text="00:00.00 / 00:00.00", width=130)
-        self.time_label.pack(side="left", padx=6)
-        ctk.CTkButton(transport, text="I", width=32, command=self._mark_in).pack(side="left", padx=1)
-        ctk.CTkButton(transport, text="O", width=32, command=self._mark_out).pack(side="left", padx=1)
-        ctk.CTkButton(transport, text="Clear", width=54, command=self._clear_io).pack(
-            side="left", padx=2
+        ctk.CTkButton(tl_row, text="+", width=32, command=lambda: self._zoom(0.7)).pack(
+            side="right", padx=2
         )
+        ctk.CTkButton(tl_row, text="Fit", width=44, command=self._zoom_fit).pack(side="right", padx=2)
+        ctk.CTkButton(tl_row, text="Sel", width=44, command=self._zoom_sel).pack(side="right", padx=2)
 
-        # Editable In / Out / Duration
+        self._tl_host = tk.Frame(scrub_fr, bg="#1a1a1e", height=56)
+        self._tl_host.pack(fill="x", pady=4)
+        self.timeline = RangeTimeline(
+            self._tl_host,
+            on_change=self._on_timeline_change,
+            on_seek=self._on_timeline_seek,
+            height=56,
+            bg="#1a1a1e",
+        )
+        self.timeline.pack(fill="x", expand=True)
+
         time_fr = ctk.CTkFrame(center, fg_color="transparent")
-        time_fr.pack(fill="x", padx=12, pady=2)
+        time_fr.pack(side="bottom", fill="x", padx=10, pady=2)
         ctk.CTkLabel(time_fr, text="In").pack(side="left")
         self.entry_in = ctk.CTkEntry(time_fr, width=88)
         self.entry_in.pack(side="left", padx=4)
@@ -272,74 +340,59 @@ class ClipworkApp(_CTkBase):
         )
         self.io_label.pack(side="left", padx=8)
 
-        # Range timeline (visual In/Out/playhead)
-        scrub_fr = ctk.CTkFrame(center, fg_color="transparent")
-        scrub_fr.pack(fill="x", padx=12, pady=(2, 2))
-        tl_row = ctk.CTkFrame(scrub_fr, fg_color="transparent")
-        tl_row.pack(fill="x")
-        ctk.CTkLabel(tl_row, text="Timeline — drag green=In, red=Out, yellow=playhead").pack(
-            side="left"
+        transport = ctk.CTkFrame(center, fg_color="transparent")
+        transport.pack(side="bottom", fill="x", padx=8, pady=4)
+        self.btn_play = ctk.CTkButton(transport, text="Play", width=64, command=self._toggle_play)
+        self.btn_play.pack(side="left", padx=2)
+        ctk.CTkButton(transport, text="Stop", width=54, command=self._stop).pack(side="left", padx=2)
+        ctk.CTkButton(transport, text="|◀", width=40, command=lambda: self._frame_step(-1)).pack(
+            side="left", padx=1
         )
-        ctk.CTkButton(tl_row, text="−", width=32, command=lambda: self._zoom(1.4)).pack(
-            side="right", padx=2
+        ctk.CTkButton(transport, text="▶|", width=40, command=lambda: self._frame_step(1)).pack(
+            side="left", padx=1
         )
-        ctk.CTkButton(tl_row, text="+", width=32, command=lambda: self._zoom(0.7)).pack(
-            side="right", padx=2
+        ctk.CTkButton(
+            transport, text="Play sel.", width=72, command=self._play_selection
+        ).pack(side="left", padx=2)
+        self.time_label = ctk.CTkLabel(transport, text="00:00.00 / 00:00.00", width=130)
+        self.time_label.pack(side="left", padx=6)
+        ctk.CTkButton(transport, text="I", width=32, command=self._mark_in).pack(side="left", padx=1)
+        ctk.CTkButton(transport, text="O", width=32, command=self._mark_out).pack(side="left", padx=1)
+        ctk.CTkButton(transport, text="Clear", width=54, command=self._clear_io).pack(
+            side="left", padx=2
         )
-        ctk.CTkButton(tl_row, text="Fit", width=44, command=self._zoom_fit).pack(side="right", padx=2)
-        ctk.CTkButton(tl_row, text="Sel", width=44, command=self._zoom_sel).pack(side="right", padx=2)
 
-        # Embed tk Canvas timeline
-        self._tl_host = tk.Frame(scrub_fr, bg="#1a1a1e", height=56)
-        self._tl_host.pack(fill="x", pady=4)
-        self.timeline = RangeTimeline(
-            self._tl_host,
-            on_change=self._on_timeline_change,
-            on_seek=self._on_timeline_seek,
-            height=56,
-            bg="#1a1a1e",
-        )
-        self.timeline.pack(fill="x", expand=True)
+        self.info_line = ctk.CTkLabel(center, text="", anchor="w", text_color=("gray30", "gray70"))
+        self.info_line.pack(side="bottom", fill="x", padx=10)
 
-        self.range_label = ctk.CTkLabel(
-            center,
-            text="Space=play  I/O=marks  ←/→=frame  Drag handles to set trim range",
-            text_color=("gray40", "gray60"),
-            anchor="w",
+        # Preview fills remaining center space and resizes with the pane
+        self.preview_frame = ctk.CTkFrame(
+            center, fg_color=("#1a1a1e", "#141418"), corner_radius=6
         )
-        self.range_label.pack(fill="x", padx=12, pady=(0, 4))
-
-        # Job progress + cancel
-        prog_fr = ctk.CTkFrame(center, fg_color="transparent")
-        prog_fr.pack(fill="x", padx=12, pady=(0, 4))
-        prow = ctk.CTkFrame(prog_fr, fg_color="transparent")
-        prow.pack(fill="x")
-        ctk.CTkLabel(prow, text="Export progress").pack(side="left")
-        self.btn_cancel = ctk.CTkButton(
-            prow, text="Cancel", width=70, command=self._cancel_export, state="disabled"
+        self.preview_frame.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+        self.preview_label = ctk.CTkLabel(
+            self.preview_frame,
+            text="Add a video, audio, or image file to preview\n"
+            "Play includes sound once audio preview is ready\n\n"
+            "Resize the window or drag the gray sashes between panes",
+            fg_color="transparent",
+            text_color=("gray50", "gray60"),
+            justify="center",
         )
-        self.btn_cancel.pack(side="right")
-        self.btn_open_folder = ctk.CTkButton(
-            prow, text="Open folder", width=90, command=self._open_last_folder, state="disabled"
-        )
-        self.btn_open_folder.pack(side="right", padx=4)
-        self.progress = ctk.CTkProgressBar(prog_fr)
-        self.progress.set(0)
-        self.progress.pack(fill="x", pady=2)
-        self.progress_label = ctk.CTkLabel(prog_fr, text="Idle", anchor="w")
-        self.progress_label.pack(fill="x")
+        self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
+        self._tk_preview = None
+        self.preview_label.bind("<ButtonPress-1>", self._crop_press)
+        self.preview_label.bind("<B1-Motion>", self._crop_motion)
+        self.preview_label.bind("<ButtonRelease-1>", self._crop_release)
+        self.preview_frame.bind("<Configure>", self._on_preview_configure)
+        if _HAS_DND:
+            try:
+                self.preview_frame.drop_target_register(DND_FILES)
+                self.preview_frame.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
 
-        # Batch queue list
-        self.queue_box = ctk.CTkTextbox(center, height=56)
-        self.queue_box.pack(fill="x", padx=12, pady=(0, 6))
-        self.queue_box.insert("1.0", "Batch queue appears here when exporting multiple files.\n")
-        self.queue_box.configure(state="disabled")
-        self._last_export_path: Path | None = None
-
-        # Right: tools
-        right = ctk.CTkFrame(main, width=300)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
+        # ── Right: tools ──
         tools_hdr = ctk.CTkFrame(right, fg_color="transparent")
         tools_hdr.pack(fill="x", padx=10, pady=(10, 2))
         ctk.CTkLabel(tools_hdr, text="Tools", font=ctk.CTkFont(weight="bold")).pack(
@@ -352,7 +405,6 @@ class ClipworkApp(_CTkBase):
             font=ctk.CTkFont(size=11),
         ).pack(side="right")
 
-        # Horizontal scroll strip (mouse wheel / trackpad + scrollbar)
         self._tool_names = [
             "Convert",
             "Compress",
@@ -385,7 +437,6 @@ class ClipworkApp(_CTkBase):
             )
             btn.pack(side="left", padx=3, pady=4)
             self._tool_buttons[name] = btn
-        # Compatibility: existing code uses self.tool.get()
         self.tool = self._tool_var
         self._bind_tool_tabs_scroll()
         self._style_tool_tabs("Trim")
@@ -407,29 +458,38 @@ class ClipworkApp(_CTkBase):
             command=self._run,
             font=ctk.CTkFont(weight="bold"),
         ).pack(fill="x", padx=10, pady=8)
-        ctk.CTkLabel(
+        self._tools_hint = ctk.CTkLabel(
             right,
             text="Single file: Save As dialog.\n"
             "Batch: pick an output folder.\n"
-            "Trim/GIF use timeline In/Out.",
-            wraplength=270,
+            "Trim/GIF use timeline In/Out.\n"
+            "Drag pane edges to resize.",
+            wraplength=max(200, right_w - 30),
             justify="left",
             text_color=("gray40", "gray60"),
-        ).pack(padx=10, pady=(0, 8))
+        )
+        self._tools_hint.pack(padx=10, pady=(0, 8))
+        right.bind("<Configure>", self._on_right_pane_configure)
 
-        # Bottom log
-        bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.pack(fill="x", padx=12, pady=(0, 8))
+        # ── Bottom: status + resizable log ──
         row = ctk.CTkFrame(bottom, fg_color="transparent")
-        row.pack(fill="x")
+        row.pack(fill="x", padx=4, pady=(4, 0))
         self.status = ctk.CTkLabel(row, text="Ready", anchor="w")
         self.status.pack(side="left")
         ctk.CTkButton(row, text="About", width=70, command=self._about).pack(side="right", padx=4)
         ctk.CTkButton(row, text="Settings", width=80, command=self._settings).pack(side="right")
-        self.log = ctk.CTkTextbox(bottom, height=90)
-        self.log.pack(fill="x", pady=(4, 0))
-        self.log.insert("1.0", "Open a file to preview. Scrub the timeline, set In/Out, then Export.\n")
+        self.log = ctk.CTkTextbox(bottom, height=max(60, log_h - 28))
+        self.log.pack(fill="both", expand=True, padx=4, pady=(4, 4))
+        self.log.insert(
+            "1.0",
+            "Open a file to preview. Scrub the timeline, set In/Out, then Export.\n"
+            "Tip: drag the gray bars between panes · resize the window freely.\n",
+        )
         self.log.configure(state="disabled")
+
+        # Apply sash positions after first layout pass
+        self.after(80, lambda: self._apply_pane_sizes(left_w, right_w, log_h))
+        self.after(200, self._mark_layout_ready)
 
     def _build_tool_panels(self) -> None:
         self.var_fmt = ctk.StringVar(value="mp4")
@@ -938,13 +998,153 @@ class ClipworkApp(_CTkBase):
                 pass
         return img.convert("RGB")
 
+    def _preview_stage(self) -> tuple[int, int]:
+        """Current letterbox stage size (follows the resizable preview pane)."""
+        w, h = self._preview_size
+        return max(PREVIEW_MIN[0], w), max(PREVIEW_MIN[1], h)
+
+    def _on_preview_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        """Resize letterbox stage when the preview pane grows or shrinks."""
+        w, h = int(event.width), int(event.height)
+        if w < 40 or h < 40:
+            return
+        # Leave a little padding so the frame border stays visible
+        pw = max(PREVIEW_MIN[0], w - 8)
+        ph = max(PREVIEW_MIN[1], h - 8)
+        pw -= pw % 2
+        ph -= ph % 2
+        if abs(pw - self._preview_size[0]) < 4 and abs(ph - self._preview_size[1]) < 4:
+            return
+        self._preview_size = (pw, ph)
+        if self._preview_resize_job is not None:
+            try:
+                self.after_cancel(self._preview_resize_job)
+            except Exception:
+                pass
+        # Debounce repaint while the user drags the sash/window
+        self._preview_resize_job = self.after(80, self._repaint_preview_from_cache)
+
+    def _repaint_preview_from_cache(self) -> None:
+        self._preview_resize_job = None
+        img = self._last_frame_img
+        if img is None:
+            return
+        try:
+            self._show_frame(img, self._session.position)
+        except Exception:
+            pass
+
+    def _on_right_pane_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if not hasattr(self, "_tools_hint"):
+            return
+        wrap = max(160, int(event.width) - 28)
+        try:
+            self._tools_hint.configure(wraplength=wrap)
+        except Exception:
+            pass
+
+    def _mark_layout_ready(self) -> None:
+        self._layout_ready = True
+
+    def _apply_pane_sizes(self, left_w: int, right_w: int, log_h: int) -> None:
+        """Place sashes from saved prefs after the first geometry pass."""
+        try:
+            self.update_idletasks()
+            total_w = max(1, self._hpaned.winfo_width())
+            total_h = max(1, self._vpaned.winfo_height())
+            # Left sash
+            lx = max(140, min(left_w, total_w - right_w - 360))
+            self._hpaned.sash_place(0, lx, 1)
+            # Right sash (from left edge)
+            rx = max(lx + 360, min(total_w - right_w, total_w - 220))
+            self._hpaned.sash_place(1, rx, 1)
+            # Log sash from top of vpaned
+            ly = max(280, total_h - max(72, log_h))
+            self._vpaned.sash_place(0, 1, ly)
+        except Exception:
+            pass
+
+    def _restore_window_state(self) -> None:
+        prefs = self._prefs
+        if not prefs.get("remember_window", True):
+            self.geometry(app_prefs.DEFAULT_GEOMETRY)
+            return
+        geo = str(prefs.get("geometry") or app_prefs.DEFAULT_GEOMETRY)
+        try:
+            self.geometry(geo)
+        except Exception:
+            self.geometry(app_prefs.DEFAULT_GEOMETRY)
+        if prefs.get("zoomed"):
+            try:
+                self.state("zoomed")
+            except Exception:
+                try:
+                    self.attributes("-zoomed", True)
+                except Exception:
+                    pass
+        # Keep window on-screen if monitor setup changed
+        self.after(50, self._ensure_on_screen)
+
+    def _ensure_on_screen(self) -> None:
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x, y = self.winfo_x(), self.winfo_y()
+            w, h = self.winfo_width(), self.winfo_height()
+            if w < 200 or h < 160:
+                return
+            nx = min(max(0, x), max(0, sw - 120))
+            ny = min(max(0, y), max(0, sh - 80))
+            if (nx, ny) != (x, y):
+                self.geometry(f"+{nx}+{ny}")
+        except Exception:
+            pass
+
+    def _save_window_state(self) -> None:
+        data = app_prefs.load_prefs()
+        if not data.get("remember_window", True):
+            return
+        try:
+            zoomed = False
+            try:
+                zoomed = bool(self.state() == "zoomed")
+            except Exception:
+                zoomed = False
+            data["zoomed"] = zoomed
+            if not zoomed:
+                # geometry() includes size+position; skip while maximized (OS-specific)
+                data["geometry"] = self.geometry()
+            # Pane widths / log height from sash coords
+            try:
+                self.update_idletasks()
+                total_w = max(1, self._hpaned.winfo_width())
+                total_h = max(1, self._vpaned.winfo_height())
+                s0 = self._hpaned.sash_coord(0)[0]
+                s1 = self._hpaned.sash_coord(1)[0]
+                data["left_pane_w"] = max(140, min(480, int(s0)))
+                data["right_pane_w"] = max(220, min(560, int(total_w - s1)))
+                log_top = self._vpaned.sash_coord(0)[1]
+                data["log_pane_h"] = max(72, min(400, int(total_h - log_top)))
+            except Exception:
+                pass
+            app_prefs.save_prefs(data)
+            self._prefs = data
+        except Exception:
+            pass
+
     def _show_frame(self, img: Image.Image, t: float) -> None:
         """Paint preview on the main thread only (letterboxed stage)."""
         try:
-            fitted = _fit_image(img, (PREVIEW_W, PREVIEW_H))
+            try:
+                self._last_frame_img = img.copy()
+            except Exception:
+                self._last_frame_img = img
+            stage = self._preview_stage()
+            fitted = _fit_image(img, stage)
             if self._crop_mode or self._logo_ghost:
                 fitted = self._draw_overlays(fitted)
-            w, h = PREVIEW_W, PREVIEW_H
+            w, h = stage
             try:
                 light = fitted
                 dark = fitted.copy()
@@ -2335,8 +2535,9 @@ class ClipworkApp(_CTkBase):
                 f"{__app_name__} is an offline media editor.\n\n"
                 "• Preview with sound; drag green/red timeline handles to select\n"
                 "• Space play · I/O marks · arrows frame-step · Play sel. loops range\n"
+                "• Drag pane edges to resize Media / Preview / Tools / Log\n"
                 "• Export Save As or batch folder · Cancel anytime · Open folder\n"
-                "• Nothing is uploaded\n"
+                "• Window size and layout are remembered · nothing is uploaded\n"
             ),
             justify="left",
         ).pack(padx=16, pady=16)
@@ -2357,18 +2558,82 @@ class ClipworkApp(_CTkBase):
         data = app_prefs.load_prefs()
         win = ctk.CTkToplevel(self)
         win.title("Settings")
-        win.geometry("400x180")
+        win.geometry("440x360")
+        win.minsize(360, 300)
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Appearance", font=ctk.CTkFont(weight="bold")).pack(
+            padx=16, pady=(16, 4), anchor="w"
+        )
+        mode_var = ctk.StringVar(value=str(data.get("appearance_mode") or "System"))
+        ctk.CTkOptionMenu(
+            win, variable=mode_var, values=["System", "Light", "Dark"], width=200
+        ).pack(padx=16, anchor="w")
+
+        ctk.CTkLabel(win, text="Window", font=ctk.CTkFont(weight="bold")).pack(
+            padx=16, pady=(14, 4), anchor="w"
+        )
+        remember_var = ctk.BooleanVar(value=bool(data.get("remember_window", True)))
+        ctk.CTkCheckBox(
+            win,
+            text="Remember size, position, and pane layout",
+            variable=remember_var,
+        ).pack(padx=16, anchor="w")
+        ctk.CTkLabel(
+            win,
+            text="Drag the gray bars between panes to resize Media, Preview, Tools, and Log.",
+            wraplength=400,
+            justify="left",
+            text_color=("gray40", "gray60"),
+        ).pack(padx=16, pady=(6, 4), anchor="w")
+
+        def reset_layout() -> None:
+            nonlocal data
+            data = app_prefs.reset_layout_prefs(data)
+            data["remember_window"] = bool(remember_var.get())
+            data["appearance_mode"] = mode_var.get()
+            app_prefs.save_prefs(data)
+            self._prefs = data
+            try:
+                if self.state() == "zoomed":
+                    self.state("normal")
+            except Exception:
+                pass
+            self.geometry(app_prefs.DEFAULT_GEOMETRY)
+            self._apply_pane_sizes(
+                app_prefs.DEFAULT_LEFT_W,
+                app_prefs.DEFAULT_RIGHT_W,
+                app_prefs.DEFAULT_LOG_H,
+            )
+            self._set_status("Layout reset to defaults")
+
+        ctk.CTkButton(win, text="Reset layout to defaults", command=reset_layout).pack(
+            padx=16, pady=8, anchor="w"
+        )
+
         var = ctk.BooleanVar(value=bool(data.get("diagnostics_enabled")))
         ctk.CTkCheckBox(win, text="Anonymous diagnostics export", variable=var).pack(
-            padx=16, pady=16, anchor="w"
+            padx=16, pady=(8, 4), anchor="w"
         )
 
         def save() -> None:
             data["diagnostics_enabled"] = bool(var.get())
+            data["remember_window"] = bool(remember_var.get())
+            data["appearance_mode"] = mode_var.get()
             app_prefs.save_prefs(data)
+            self._prefs = data
+            try:
+                ctk.set_appearance_mode(mode_var.get())
+                # Refresh sash colors for light/dark
+                bg = self._sash_bg()
+                self._hpaned.configure(bg=bg)
+                self._vpaned.configure(bg=bg)
+            except Exception:
+                pass
             win.destroy()
 
-        ctk.CTkButton(win, text="Save", command=save).pack(pady=8)
+        ctk.CTkButton(win, text="Save", command=save, width=100).pack(pady=16)
 
     def _about(self) -> None:
         data = app_prefs.load_prefs()
