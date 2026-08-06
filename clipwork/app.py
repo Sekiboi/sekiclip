@@ -155,10 +155,7 @@ class ClipworkApp(_CTkBase):
         self._batch_queue_lines: list[str] = []
         self._layout_ready = False
         self._pending_reload_path: Path | None = None  # re-open after in-place replace
-        # Staged edit settings: draft (UI) vs applied (preview + export)
-        self._edit_dirty = False
-        self._suppress_edit_dirty = False
-        self._applied_edit: dict[str, Any] = {}
+        self._suppress_preview_trace = False  # avoid feedback loops when resetting looks
 
         self._build()
         self._set_icons()
@@ -590,48 +587,20 @@ class ClipworkApp(_CTkBase):
         fr = self._panels["Edit"]
         ctk.CTkLabel(
             fr,
-            text="Change settings → Apply to preview → Export.\n"
-            "Discard reverts to the last applied look.",
+            text="Preview updates live — what you see is what you export.\n"
+            "Timeline In/Out set the cut range.",
             wraplength=260,
             justify="left",
             text_color=("gray30", "gray70"),
         ).pack(anchor="w", pady=(0, 4))
-
-        # Staged settings bar (standard draft / apply / discard)
-        apply_bar = ctk.CTkFrame(fr, fg_color=("gray85", "gray20"), corner_radius=8)
-        apply_bar.pack(fill="x", pady=(0, 8))
-        row_ab = ctk.CTkFrame(apply_bar, fg_color="transparent")
-        row_ab.pack(fill="x", padx=6, pady=6)
-        self.btn_apply_preview = ctk.CTkButton(
-            row_ab,
-            text="Apply to preview",
-            width=120,
-            height=30,
-            state="disabled",
-            command=self._apply_edit_settings,
-            font=ctk.CTkFont(weight="bold"),
-        )
-        self.btn_apply_preview.pack(side="left", padx=(0, 4))
-        self.btn_discard_edit = ctk.CTkButton(
-            row_ab,
-            text="Discard",
-            width=80,
-            height=30,
-            state="disabled",
-            fg_color=("gray70", "gray35"),
-            hover_color=("gray60", "gray40"),
-            command=self._discard_edit_settings,
-        )
-        self.btn_discard_edit.pack(side="left")
-        self.apply_status = ctk.CTkLabel(
-            apply_bar,
-            text="Preview matches export · no unapplied changes",
-            anchor="w",
-            text_color=("gray40", "gray60"),
-            font=ctk.CTkFont(size=11),
-            wraplength=250,
-        )
-        self.apply_status.pack(fill="x", padx=8, pady=(0, 6))
+        ctk.CTkButton(
+            fr,
+            text="Reset looks",
+            height=28,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            command=self._reset_edit_looks,
+        ).pack(fill="x", pady=(0, 6))
 
         ctk.CTkLabel(fr, text="Action").pack(anchor="w")
         ctk.CTkOptionMenu(
@@ -720,11 +689,6 @@ class ClipworkApp(_CTkBase):
         )
         self.edit_files_label.pack(anchor="w", pady=4)
 
-        # Baseline applied state = current defaults (preview starts clean)
-        self._applied_edit = self._snapshot_edit_settings()
-        self._edit_dirty = False
-        self._update_apply_bar()
-
         fr = self._panels["Audio"]
         ctk.CTkOptionMenu(
             fr,
@@ -778,7 +742,7 @@ class ClipworkApp(_CTkBase):
             self._logo_path = Path(p)
             self._update_edit_files_label()
 
-    def _update_edit_files_label(self, *, mark_dirty: bool = True) -> None:
+    def _update_edit_files_label(self) -> None:
         parts = []
         if self._srt_path:
             parts.append(f"SRT: {self._srt_path.name}")
@@ -788,8 +752,7 @@ class ClipworkApp(_CTkBase):
             self.edit_files_label.configure(
                 text=" · ".join(parts) if parts else "No .srt / logo chosen"
             )
-        if mark_dirty:
-            self._on_edit_setting_changed()
+        self._on_edit_setting_changed()
 
     def _select_tool(self, name: str) -> None:
         """Switch active tool tab and highlight its pill button."""
@@ -1015,8 +978,8 @@ class ClipworkApp(_CTkBase):
     def _on_session_status(self, msg: str) -> None:
         self.after(0, lambda m=msg: self._set_status(m))
 
-    def _snapshot_edit_settings(self) -> dict[str, Any]:
-        """Capture current draft (UI) edit settings."""
+    def _live_settings(self) -> dict[str, Any]:
+        """Current UI edit settings — single source for preview and export."""
         return {
             "edit_action": self.var_edit_action.get(),
             "cut_quality": self.var_cut_quality.get(),
@@ -1038,113 +1001,62 @@ class ClipworkApp(_CTkBase):
             "crop_rect": tuple(self._crop_rect),
             "srt_path": self._srt_path,
             "logo_path": self._logo_path,
-            "crop_mode": bool(self._crop_mode),
             "logo_ghost": bool(self._logo_ghost),
             "gif_fmt": self.var_gif_fmt.get(),
             "max_mb": self.var_max_mb.get(),
         }
 
-    def _restore_edit_settings(self, snap: dict[str, Any]) -> None:
-        """Push a snapshot back into the UI (draft), without marking dirty."""
-        self._suppress_edit_dirty = True
+    def _reset_edit_looks(self) -> None:
+        """Reset fades/volume/crop/logo toggles to defaults (keeps timeline In/Out)."""
+        self._suppress_preview_trace = True
         try:
-            self.var_edit_action.set(str(snap.get("edit_action") or "render_cut"))
-            self.var_cut_quality.set(str(snap.get("cut_quality") or "high"))
-            self.var_fade_video.set(bool(snap.get("fade_video", True)))
-            self.var_fade_audio.set(bool(snap.get("fade_audio", True)))
-            self.var_v_fade_in.set(str(snap.get("v_fade_in") or "0.5"))
-            self.var_v_fade_out.set(str(snap.get("v_fade_out") or "0.5"))
-            self.var_a_fade_in.set(str(snap.get("a_fade_in") or "0.5"))
-            self.var_a_fade_out.set(str(snap.get("a_fade_out") or "0.5"))
-            self.var_mute.set(bool(snap.get("mute", False)))
-            vol = str(snap.get("volume") or "1.0")
-            self.var_volume.set(vol)
+            self.var_edit_action.set("render_cut")
+            self.var_cut_quality.set("high")
+            self.var_fade_video.set(True)
+            self.var_fade_audio.set(True)
+            self.var_v_fade_in.set("0.5")
+            self.var_v_fade_out.set("0.5")
+            self.var_a_fade_in.set("0.5")
+            self.var_a_fade_out.set("0.5")
+            self.var_mute.set(False)
+            self.var_volume.set("1.0")
             try:
-                self.volume_slider.set(float(vol))
-                self.volume_label.configure(text=f"{int(float(vol) * 100)}%")
+                self.volume_slider.set(1.0)
+                self.volume_label.configure(text="100%")
             except Exception:
                 pass
-            self.var_speed.set(str(snap.get("speed") or "1.0"))
-            self.var_use_crop.set(bool(snap.get("use_crop", False)))
-            self.var_use_logo.set(bool(snap.get("use_logo", False)))
-            self.var_use_subs.set(bool(snap.get("use_subs", False)))
-            self.var_logo_pos.set(str(snap.get("logo_pos") or "top-right"))
-            self.var_logo_scale.set(str(snap.get("logo_scale") or "0.15"))
-            self.var_crop_margin.set(str(snap.get("crop_margin") or "40"))
-            cr = snap.get("crop_rect") or (0.1, 0.1, 0.9, 0.9)
-            self._crop_rect = (float(cr[0]), float(cr[1]), float(cr[2]), float(cr[3]))
-            self._srt_path = snap.get("srt_path")  # type: ignore[assignment]
-            self._logo_path = snap.get("logo_path")  # type: ignore[assignment]
-            self._crop_mode = bool(snap.get("crop_mode", False))
-            self._logo_ghost = bool(snap.get("logo_ghost", False))
-            self.var_gif_fmt.set(str(snap.get("gif_fmt") or "gif"))
-            self.var_max_mb.set(str(snap.get("max_mb") or "25"))
-            self._update_edit_files_label(mark_dirty=False)
+            self.var_speed.set("1.0")
+            self.var_use_crop.set(False)
+            self.var_use_logo.set(False)
+            self.var_use_subs.set(False)
+            self.var_logo_pos.set("top-right")
+            self.var_logo_scale.set("0.15")
+            self.var_crop_margin.set("40")
+            self._crop_rect = (0.1, 0.1, 0.9, 0.9)
+            self._crop_mode = False
+            self._logo_ghost = False
+            self._srt_path = None
+            self._logo_path = None
+            self._update_edit_files_label()
         finally:
-            self._suppress_edit_dirty = False
-
-    def _applied(self) -> dict[str, Any]:
-        """Last applied settings (drives preview + export). Falls back to draft."""
-        if self._applied_edit:
-            return self._applied_edit
-        return self._snapshot_edit_settings()
-
-    def _update_apply_bar(self) -> None:
-        if not hasattr(self, "btn_apply_preview"):
-            return
-        dirty = bool(self._edit_dirty)
-        self.btn_apply_preview.configure(state="normal" if dirty else "disabled")
-        self.btn_discard_edit.configure(state="normal" if dirty else "disabled")
-        if dirty:
-            self.apply_status.configure(
-                text="Unapplied changes — Apply to update preview & export",
-                text_color=("#b45309", "#fbbf24"),
-            )
-        else:
-            self.apply_status.configure(
-                text="Preview matches export · ready",
-                text_color=("gray40", "gray60"),
-            )
-
-    def _apply_edit_settings(self) -> None:
-        """Commit draft → applied; refresh preview (standard Apply)."""
-        self._applied_edit = self._snapshot_edit_settings()
-        self._edit_dirty = False
-        self._update_apply_bar()
+            self._suppress_preview_trace = False
         self._sync_preview_audio()
         self._repaint_preview_from_cache()
-        # Nudge playhead so user sees fade region if they're outside selection
-        if self._session.info:
-            try:
-                self._session.seek(self._session.position)
-            except Exception:
-                pass
-        self._set_status("Applied to preview — ready to export")
-        self._log("Applied edit settings to preview (export will match).")
-
-    def _discard_edit_settings(self) -> None:
-        """Revert draft UI to last applied (standard Discard / Cancel changes)."""
-        if not self._applied_edit:
-            self._applied_edit = self._snapshot_edit_settings()
-        self._restore_edit_settings(self._applied_edit)
-        self._edit_dirty = False
-        self._update_apply_bar()
-        self._set_status("Changes discarded")
-        self._log("Discarded unapplied edit settings.")
+        self._set_status("Looks reset — timeline In/Out unchanged")
+        self._log("Reset edit looks to defaults.")
 
     def _sync_preview_audio(self) -> None:
-        """Push applied mute/volume into the session (preview play = export)."""
-        a = self._applied()
+        """Preview play uses the same mute/volume as export."""
         try:
-            mute = bool(a.get("mute", False))
-            vol = float(a.get("volume") or 1.0)
+            mute = bool(self.var_mute.get())
+            vol = float(self.var_volume.get() or 1.0)
         except Exception:
             mute, vol = False, 1.0
         self._session.preview_mute = mute
         self._session.preview_volume = max(0.0, min(4.0, vol))
 
     def _bind_preview_traces(self) -> None:
-        """Draft edits mark dirty and light Apply — they do not change preview until Apply."""
+        """Any look change updates the preview immediately (WYSIWYG)."""
         for name in (
             "var_fade_video",
             "var_fade_audio",
@@ -1163,8 +1075,6 @@ class ClipworkApp(_CTkBase):
             "var_edit_action",
             "var_cut_quality",
             "var_crop_margin",
-            "var_gif_fmt",
-            "var_max_mb",
         ):
             v = getattr(self, name, None)
             if v is not None:
@@ -1174,17 +1084,23 @@ class ClipworkApp(_CTkBase):
                     pass
 
     def _on_edit_setting_changed(self) -> None:
-        """Any draft tool change → dirty state (Apply / Discard light up)."""
-        if self._suppress_edit_dirty:
+        """Live: sync audio + refresh preview (debounced)."""
+        if self._suppress_preview_trace:
             return
-        self._edit_dirty = True
-        self._update_apply_bar()
+        self._sync_preview_audio()
+        if self._preview_resize_job is not None:
+            try:
+                self.after_cancel(self._preview_resize_job)
+            except Exception:
+                pass
+        # Short debounce so typing fade seconds doesn't thrash paint
+        self._preview_resize_job = self.after(40, self._repaint_preview_from_cache)
 
     def _draw_overlays(self, fitted: Image.Image, t: float | None = None) -> Image.Image:
-        """Preview from *applied* settings only (+ live crop handles while adjusting)."""
+        """Live export-faithful preview from current UI settings."""
         from PIL import ImageDraw
 
-        a = self._applied()
+        a = self._live_settings()
         img = fitted.convert("RGBA")
         w, h = img.size
         if t is None:
@@ -1204,27 +1120,19 @@ class ClipworkApp(_CTkBase):
         t_rel = t - inn
         outside = t < inn - 1e-3 or t > outp + 1e-3
 
-        # Crop: applied rect for export look; draft handles while crop_mode is on
-        use_crop = bool(a.get("use_crop"))
-        crop_rect = a.get("crop_rect") or (0.1, 0.1, 0.9, 0.9)
-        if self._crop_mode:
-            # Show draft rect with handles while positioning (not yet export unless Apply)
-            crop_rect = self._crop_rect
-            use_crop = True
+        use_crop = bool(a.get("use_crop")) or self._crop_mode
         if use_crop:
-            l, top, r, b = crop_rect  # type: ignore[misc]
+            l, top, r, b = self._crop_rect
             x0, y0, x1, y1 = int(l * w), int(top * h), int(r * w), int(b * h)
             d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 140))
             d.rectangle([0, y1, w, h], fill=(0, 0, 0, 140))
             d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 140))
             d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 140))
-            outline = (250, 204, 21, 255) if self._crop_mode and self._edit_dirty else (34, 197, 94, 255)
-            d.rectangle([x0, y0, x1, y1], outline=outline, width=2)
+            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94, 255), width=2)
             if self._crop_mode:
                 for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-                    d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=outline)
+                    d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=(34, 197, 94, 255))
 
-        # Logo from applied
         use_logo = bool(a.get("use_logo")) or bool(a.get("logo_ghost"))
         logo_path = a.get("logo_path")
         if use_logo and logo_path and Path(str(logo_path)).is_file():
@@ -1252,7 +1160,7 @@ class ClipworkApp(_CTkBase):
             except Exception:
                 pass
 
-        # Video fade from applied (relative to In/Out)
+        # Video fade relative to In/Out (matches export)
         vfi = vfo = 0.0
         try:
             if a.get("fade_video"):
@@ -1277,8 +1185,6 @@ class ClipworkApp(_CTkBase):
 
         badges: list[str] = []
         try:
-            if self._edit_dirty:
-                badges.append("DRAFT")
             if outside and self._session.info:
                 badges.append("OUTSIDE SEL")
             if a.get("mute"):
@@ -1299,7 +1205,7 @@ class ClipworkApp(_CTkBase):
                 badges.append(f"V-fade {vfi:g}/{vfo:g}s")
             if a.get("use_subs") and a.get("srt_path"):
                 badges.append("SUBS")
-            if a.get("use_crop"):
+            if a.get("use_crop") or self._crop_mode:
                 badges.append("CROP")
             if a.get("use_logo") and a.get("logo_path"):
                 badges.append("LOGO")
@@ -1697,9 +1603,8 @@ class ClipworkApp(_CTkBase):
         self._on_edit_setting_changed()
 
     def _cut_quality_params(self) -> tuple[int, str]:
-        """Map applied quality label → (crf, x264 preset)."""
-        a = self._applied()
-        q = str(a.get("cut_quality") or "high").lower()
+        """Map UI quality label → (crf, x264 preset)."""
+        q = (self.var_cut_quality.get() or "high").lower()
         if q == "fast":
             return 23, "veryfast"
         if q == "balanced":
@@ -1707,21 +1612,19 @@ class ClipworkApp(_CTkBase):
         return 18, "medium"  # high
 
     def _fade_seconds(self) -> tuple[float, float, float, float]:
-        """Applied video/audio fades (0 when checkbox off)."""
-        a = self._applied()
+        """Live video/audio fades (0 when checkbox off)."""
         try:
-            vfi = float(a.get("v_fade_in") or 0) if a.get("fade_video") else 0.0
-            vfo = float(a.get("v_fade_out") or 0) if a.get("fade_video") else 0.0
-            afi = float(a.get("a_fade_in") or 0) if a.get("fade_audio") else 0.0
-            afo = float(a.get("a_fade_out") or 0) if a.get("fade_audio") else 0.0
+            vfi = float(self.var_v_fade_in.get() or 0) if self.var_fade_video.get() else 0.0
+            vfo = float(self.var_v_fade_out.get() or 0) if self.var_fade_video.get() else 0.0
+            afi = float(self.var_a_fade_in.get() or 0) if self.var_fade_audio.get() else 0.0
+            afo = float(self.var_a_fade_out.get() or 0) if self.var_fade_audio.get() else 0.0
         except (TypeError, ValueError):
             vfi = vfo = afi = afo = 0.0
         return max(0.0, vfi), max(0.0, vfo), max(0.0, afi), max(0.0, afo)
 
     def _crop_pixels(self, src: Path) -> tuple[int, int, int | None, int | None]:
-        """Crop x,y,w,h from *applied* overlay (or margin)."""
-        a = self._applied()
-        if not a.get("use_crop"):
+        """Crop x,y,w,h from current overlay (or margin)."""
+        if not self.var_use_crop.get() and not self._crop_mode:
             return 0, 0, None, None
         info = ops.probe(src)
         vw = vh = 0
@@ -1732,18 +1635,17 @@ class ClipworkApp(_CTkBase):
                 break
         if vw < 2 or vh < 2:
             return 0, 0, None, None
-        cr = a.get("crop_rect") or (0.1, 0.1, 0.9, 0.9)
-        l, t, r, b = float(cr[0]), float(cr[1]), float(cr[2]), float(cr[3])
-        if (l, t, r, b) != (0.0, 0.0, 1.0, 1.0):
-            x = max(0, int(l * vw))
-            y = max(0, int(t * vh))
-            w = max(2, int((r - l) * vw))
-            h = max(2, int((b - t) * vh))
-            w -= w % 2
-            h -= h % 2
+        l, t, r, b = self._crop_rect
+        x = max(0, int(l * vw))
+        y = max(0, int(t * vh))
+        w = max(2, int((r - l) * vw))
+        h = max(2, int((b - t) * vh))
+        w -= w % 2
+        h -= h % 2
+        if w >= 2 and h >= 2:
             return x, y, w, h
         try:
-            margin = int(a.get("crop_margin") or 0)
+            margin = int(self.var_crop_margin.get() or 0)
         except (TypeError, ValueError):
             margin = 0
         if margin > 0:
@@ -1761,19 +1663,18 @@ class ClipworkApp(_CTkBase):
         if self._crop_mode and hasattr(self, "var_use_crop"):
             self.var_use_crop.set(True)
         self._set_status(
-            "Crop overlay ON — drag corners, then Apply to preview"
+            "Crop overlay ON — drag corners on preview"
             if self._crop_mode
             else "Crop overlay off"
         )
         self._on_edit_setting_changed()
-        self._repaint_preview_from_cache()
 
     def _toggle_logo_ghost(self) -> None:
         self._logo_ghost = not self._logo_ghost
         self._crop_mode = False
         if self._logo_ghost and hasattr(self, "var_use_logo"):
             self.var_use_logo.set(True)
-        self._set_status("Logo ghost ON — Apply to lock into preview" if self._logo_ghost else "Logo ghost off")
+        self._set_status("Logo ghost ON" if self._logo_ghost else "Logo ghost off")
         self._on_edit_setting_changed()
 
     def _crop_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
@@ -1831,13 +1732,10 @@ class ClipworkApp(_CTkBase):
         elif d == "new":
             r, b = max(nx, l + 0.05), max(ny, t + 0.05)
         self._crop_rect = (l, t, r, b)
-        self._on_edit_setting_changed()
-        # Draft crop handles update live; export look waits for Apply
         self._repaint_preview_from_cache()
 
     def _crop_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
         self._crop_drag = None
-        self._on_edit_setting_changed()
 
     def _cancel_export(self) -> None:
         request_cancel()
@@ -2121,21 +2019,6 @@ class ClipworkApp(_CTkBase):
         tool = self.tool.get()
         batch = bool(self.var_batch.get()) and tool != "More"
 
-        # Standard: unapplied draft must be resolved before export
-        if tool == "Edit" and self._edit_dirty:
-            choice = messagebox.askyesnocancel(
-                __app_name__,
-                "You have unapplied edit settings.\n\n"
-                "Yes — Apply to preview, then export\n"
-                "No — Export last applied look (discard draft for this export)\n"
-                "Cancel — Go back",
-            )
-            if choice is None:
-                return
-            if choice:
-                self._apply_edit_settings()
-            # No = keep applied as-is (draft stays dirty until Apply/Discard)
-
         if tool == "More" and self.var_more.get() == "concat":
             files = [p for p in self._files if p.suffix.lower() in VIDEO_EXTS]
             if len(files) < 2:
@@ -2338,7 +2221,7 @@ class ClipworkApp(_CTkBase):
         raise RuntimeError(f"Batch not supported for tool: {tool}")
 
     def _batch_edit_runner(self) -> tuple[str, str, Any]:
-        a = self._applied()
+        a = self._live_settings()
         act = str(a.get("edit_action") or "render_cut")
         try:
             margin = int(a.get("crop_margin") or 0)
@@ -2730,7 +2613,7 @@ class ClipworkApp(_CTkBase):
             )
 
         if tool == "Edit":
-            a = self._applied()
+            a = self._live_settings()
             act = str(a.get("edit_action") or "render_cut")
             if act in ("render_cut", "fade"):
                 start = self._session.in_point
@@ -2744,7 +2627,7 @@ class ClipworkApp(_CTkBase):
                 logo = None
                 srt = None
                 if act == "render_cut":
-                    if a.get("use_crop"):
+                    if a.get("use_crop") or self._crop_mode:
                         cx, cy, cw, ch = self._crop_pixels(src)
                     if a.get("use_logo") and a.get("logo_path"):
                         logo = Path(str(a["logo_path"]))
