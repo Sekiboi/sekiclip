@@ -137,11 +137,15 @@ def run_ffmpeg(
     on_progress: Callable[[float, str], None] | None = None,
     duration_hint: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ffmpeg; supports cancel via request_cancel() and optional progress."""
+    """Run ffmpeg; supports cancel via request_cancel() and optional progress.
+
+    Important: stderr is drained on a side thread so the process cannot deadlock
+    when the stderr pipe fills (common hang: progress stuck mid-export).
+    """
     global _CURRENT_PROC
     clear_cancel()
     ffmpeg = str(require_ffmpeg())
-    # Always enable progress pipe when callback provided
+    # progress on stdout (pipe:1); keep stderr separate and always drain it
     if on_progress is not None:
         cmd = [ffmpeg, "-hide_banner", "-y", "-progress", "pipe:1", "-nostats", *args]
     else:
@@ -153,7 +157,7 @@ def run_ffmpeg(
 
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE if on_progress else subprocess.DEVNULL,
+        stdout=subprocess.PIPE if on_progress else subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
@@ -163,34 +167,66 @@ def run_ffmpeg(
     with _PROC_LOCK:
         _CURRENT_PROC = proc
 
-    stdout_data = ""
+    stderr_chunks: list[str] = []
+
+    def _drain_stderr() -> None:
+        try:
+            if proc.stderr is None:
+                return
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+                if len(stderr_chunks) > 400:
+                    # keep tail only
+                    del stderr_chunks[:-200]
+        except Exception:
+            pass
+
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    err_thread.start()
+
     try:
         if on_progress and proc.stdout is not None:
-            out_time_ms = 0
             for line in proc.stdout:
                 if _CANCEL_REQUESTED:
-                    proc.kill()
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
                     break
                 line = line.strip()
                 if line.startswith("out_time_ms="):
                     try:
                         out_time_ms = int(line.split("=", 1)[1])
                     except ValueError:
-                        pass
+                        continue
+                    t = out_time_ms / 1_000_000.0
                     if duration_hint and duration_hint > 0:
-                        t = out_time_ms / 1_000_000.0
-                        on_progress(min(0.99, max(0.0, t / duration_hint)), f"{t:.1f}s")
-                elif line == "progress=end":
-                    on_progress(1.0, "done")
-            proc.wait(timeout=timeout)
-        else:
+                        frac = min(0.99, max(0.0, t / duration_hint))
+                        pct = int(frac * 100)
+                        on_progress(frac, f"{pct}% · {t:.1f}s / {duration_hint:.1f}s")
+                    else:
+                        on_progress(min(0.99, t / max(t, 1.0)), f"{t:.1f}s")
+                elif line.startswith("progress=") and line.endswith("end"):
+                    on_progress(1.0, "100% · done")
             try:
-                _, err = proc.communicate(timeout=timeout)
-                stdout_data = err or ""
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                raise RuntimeError(f"ffmpeg timed out: {' '.join(args[:8])}…") from exc
+        else:
+            # Drain stdout too (may be empty) while stderr thread runs
+            try:
+                out, _ = proc.communicate(timeout=timeout)
+                # stderr already in thread; join below
+                _ = out
             except subprocess.TimeoutExpired as exc:
                 proc.kill()
                 raise RuntimeError(f"ffmpeg timed out: {' '.join(args[:8])}…") from exc
     finally:
+        try:
+            err_thread.join(timeout=2.0)
+        except Exception:
+            pass
         with _PROC_LOCK:
             if _CURRENT_PROC is proc:
                 _CURRENT_PROC = None
@@ -198,17 +234,9 @@ def run_ffmpeg(
     if _CANCEL_REQUESTED:
         raise CancelledError("Export cancelled")
 
-    stderr = ""
-    if proc.stderr and not stdout_data:
-        try:
-            stderr = proc.stderr.read() or ""
-        except Exception:
-            stderr = ""
-    elif stdout_data:
-        stderr = stdout_data
+    stderr = "".join(stderr_chunks)
 
     if check and proc.returncode not in (0, None) and proc.returncode != 0:
-        # cancelled processes may be non-zero
         if _CANCEL_REQUESTED:
             raise CancelledError("Export cancelled")
         tail = (stderr or "").strip()

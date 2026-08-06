@@ -1600,27 +1600,37 @@ class ClipworkApp(_CTkBase):
             out_path = dest
             suffix = dest.suffix or src.suffix or ".mp4"
             if reenc and ops.find_ffmpeg():
-                args = ["-ss", str(start), "-i", str(src)]
+                # -ss after -i = accurate cut for re-encode; -t = selection length
+                args = ["-i", str(src), "-ss", str(start)]
                 if dur:
                     args += ["-t", str(dur)]
+                elif end is not None:
+                    args += ["-to", str(end)]
                 if suffix.lower() in (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"):
-                    args += ["-c:a", "libmp3lame", str(out_path)]
+                    args += ["-c:a", "libmp3lame", "-q:a", "2", str(out_path)]
                 else:
+                    # veryfast keeps quality fine for everyday trims and finishes much quicker
                     args += [
                         "-c:v",
                         "libx264",
+                        "-preset",
+                        "veryfast",
                         "-crf",
                         "23",
                         "-c:a",
                         "aac",
+                        "-b:a",
+                        "128k",
                         "-movflags",
                         "+faststart",
                         str(out_path),
                     ]
-                hint = float(dur or self._session.duration or 1)
+                hint = float(dur if dur and dur > 0 else (self._session.duration or 1))
                 try:
                     run_ffmpeg_with_progress(args, duration_hint=hint, on_progress=prog)
                     jr = jobs.JobResult("trim", [out_path], True, 0.0)
+                except CancelledError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(str(exc)) from exc
             else:
