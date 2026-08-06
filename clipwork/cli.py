@@ -160,6 +160,99 @@ def cmd_gui(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _out(args: argparse.Namespace):
+    return Path(args.output) if getattr(args, "output", None) else None
+
+
+def cmd_crop(args: argparse.Namespace) -> int:
+    print(
+        ops.crop_video(
+            args.input,
+            _out(args),
+            x=args.x,
+            y=args.y,
+            width=args.width,
+            height=args.height,
+            margin=args.margin,
+        )
+    )
+    return 0
+
+
+def cmd_volume(args: argparse.Namespace) -> int:
+    print(
+        ops.adjust_volume(
+            args.input, _out(args), volume=args.volume, mute=bool(args.mute)
+        )
+    )
+    return 0
+
+
+def cmd_speed(args: argparse.Namespace) -> int:
+    print(ops.change_speed(args.input, _out(args), speed=args.speed))
+    return 0
+
+
+def cmd_gif(args: argparse.Namespace) -> int:
+    print(
+        ops.export_gif(
+            args.input,
+            _out(args),
+            start=float(args.start),
+            end=float(args.end) if args.end else None,
+            duration=float(args.duration) if args.duration else None,
+            fps=args.fps,
+            max_width=args.max_width,
+            fmt=args.format,
+        )
+    )
+    return 0
+
+
+def cmd_fade(args: argparse.Namespace) -> int:
+    print(
+        ops.fade_media(
+            args.input, _out(args), fade_in=args.fade_in, fade_out=args.fade_out
+        )
+    )
+    return 0
+
+
+def cmd_flip(args: argparse.Namespace) -> int:
+    src = Path(args.input)
+    if src.suffix.lower() in ops.IMAGE_EXTS:
+        print(ops.flip_image(src, _out(args), horizontal=not args.vertical))
+    else:
+        print(ops.flip_video(src, _out(args), horizontal=not args.vertical))
+    return 0
+
+
+def cmd_target_size(args: argparse.Namespace) -> int:
+    print(ops.target_size_video(args.input, _out(args), max_mb=args.max_mb))
+    for w in ops.take_warnings():
+        print(f"warning: {w}", file=sys.stderr)
+    return 0
+
+
+def cmd_burn_subs(args: argparse.Namespace) -> int:
+    print(ops.burn_subtitles(args.input, args.srt, _out(args)))
+    return 0
+
+
+def cmd_logo(args: argparse.Namespace) -> int:
+    print(
+        ops.logo_overlay(
+            args.input,
+            args.logo,
+            _out(args),
+            position=args.position,
+            scale=args.scale,
+            opacity=args.opacity,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="clipwork",
@@ -261,6 +354,74 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", required=True)
     s.add_argument("--copy", action="store_true", help="Stream copy (requires matching codecs)")
     s.set_defaults(func=cmd_concat)
+
+    s = sub.add_parser("crop", help="Crop video (margin or x/y/w/h)")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--margin", type=int, default=0)
+    s.add_argument("--x", type=int, default=0)
+    s.add_argument("--y", type=int, default=0)
+    s.add_argument("--width", type=int, default=None)
+    s.add_argument("--height", type=int, default=None)
+    s.set_defaults(func=cmd_crop)
+
+    s = sub.add_parser("volume", help="Adjust volume or mute")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--volume", type=float, default=1.0)
+    s.add_argument("--mute", action="store_true")
+    s.set_defaults(func=cmd_volume)
+
+    s = sub.add_parser("speed", help="Change playback speed")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--speed", type=float, default=1.5)
+    s.set_defaults(func=cmd_speed)
+
+    s = sub.add_parser("gif", help="Export GIF/WebP clip")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--start", default="0")
+    s.add_argument("--end", default=None)
+    s.add_argument("--duration", default=None)
+    s.add_argument("--fps", type=int, default=12)
+    s.add_argument("--max-width", type=int, default=480)
+    s.add_argument("-f", "--format", default="gif", choices=("gif", "webp"))
+    s.set_defaults(func=cmd_gif)
+
+    s = sub.add_parser("fade", help="Fade in/out")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--fade-in", type=float, default=0.5)
+    s.add_argument("--fade-out", type=float, default=0.5)
+    s.set_defaults(func=cmd_fade)
+
+    s = sub.add_parser("flip", help="Flip video or image")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--vertical", action="store_true")
+    s.set_defaults(func=cmd_flip)
+
+    s = sub.add_parser("target-size", help="Approximate max file size (MB)")
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--max-mb", type=float, default=25.0)
+    s.set_defaults(func=cmd_target_size)
+
+    s = sub.add_parser("burn-subs", help="Burn SRT subtitles into video")
+    s.add_argument("input")
+    s.add_argument("srt")
+    s.add_argument("-o", "--output")
+    s.set_defaults(func=cmd_burn_subs)
+
+    s = sub.add_parser("logo", help="Overlay logo image on video")
+    s.add_argument("input")
+    s.add_argument("logo")
+    s.add_argument("-o", "--output")
+    s.add_argument("--position", default="top-right")
+    s.add_argument("--scale", type=float, default=0.15)
+    s.add_argument("--opacity", type=float, default=1.0)
+    s.set_defaults(func=cmd_logo)
 
     s = sub.add_parser("gui", help="Open the GUI")
     s.set_defaults(func=cmd_gui)

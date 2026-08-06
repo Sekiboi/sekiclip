@@ -7,6 +7,7 @@ import threading
 import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Any
 
 from PIL import Image
 
@@ -270,16 +271,21 @@ class ClipworkApp(_CTkBase):
         )
         self.tool = ctk.CTkSegmentedButton(
             right,
-            values=["Convert", "Compress", "Trim", "Audio", "Image", "More"],
+            values=["Convert", "Compress", "Trim", "Edit", "Audio", "Image", "More"],
             command=self._on_tool_change,
         )
         self.tool.set("Trim")
         self.tool.pack(fill="x", padx=10, pady=4)
 
-        self.tool_frame = ctk.CTkFrame(right, fg_color="transparent")
-        self.tool_frame.pack(fill="both", expand=True, padx=8, pady=4)
+        self.tool_frame = ctk.CTkScrollableFrame(right, fg_color="transparent")
+        self.tool_frame.pack(fill="both", expand=True, padx=4, pady=4)
         self._panels: dict[str, ctk.CTkFrame] = {}
         self._build_tool_panels()
+
+        self.var_batch = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            right, text="Batch all files in list", variable=self.var_batch
+        ).pack(anchor="w", padx=10, pady=(4, 0))
 
         ctk.CTkButton(
             right,
@@ -290,8 +296,9 @@ class ClipworkApp(_CTkBase):
         ).pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(
             right,
-            text="Export asks where to save the new file.\n"
-            "Trim uses In/Out from the timeline.",
+            text="Single file: Save As dialog.\n"
+            "Batch: pick an output folder.\n"
+            "Trim/GIF use timeline In/Out.",
             wraplength=270,
             justify="left",
             text_color=("gray40", "gray60"),
@@ -323,8 +330,22 @@ class ClipworkApp(_CTkBase):
         self.var_audio_action = ctk.StringVar(value="extract")
         self.var_image_action = ctk.StringVar(value="compress")
         self.var_more = ctk.StringVar(value="remux")
+        # Edit tab
+        self.var_edit_action = ctk.StringVar(value="crop")
+        self.var_crop_margin = ctk.StringVar(value="40")
+        self.var_volume = ctk.StringVar(value="1.0")
+        self.var_mute = ctk.BooleanVar(value=False)
+        self.var_speed = ctk.StringVar(value="1.5")
+        self.var_gif_fmt = ctk.StringVar(value="gif")
+        self.var_fade_in = ctk.StringVar(value="0.5")
+        self.var_fade_out = ctk.StringVar(value="0.5")
+        self.var_max_mb = ctk.StringVar(value="25")
+        self.var_logo_pos = ctk.StringVar(value="top-right")
+        self.var_logo_scale = ctk.StringVar(value="0.15")
+        self._srt_path: Path | None = None
+        self._logo_path: Path | None = None
 
-        for name in ("Convert", "Compress", "Trim", "Audio", "Image", "More"):
+        for name in ("Convert", "Compress", "Trim", "Edit", "Audio", "Image", "More"):
             self._panels[name] = ctk.CTkFrame(self.tool_frame, fg_color="transparent")
 
         fr = self._panels["Convert"]
@@ -336,10 +357,17 @@ class ClipworkApp(_CTkBase):
         ).pack(fill="x", pady=4)
 
         fr = self._panels["Compress"]
-        ctk.CTkLabel(fr, text="Video preset").pack(anchor="w")
-        ctk.CTkOptionMenu(fr, variable=self.var_preset, values=list(ops.COMPRESS_PRESETS)).pack(
-            fill="x", pady=4
-        )
+        ctk.CTkLabel(fr, text="Share / quality preset").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr, variable=self.var_preset, values=list(ops.COMPRESS_PRESETS)
+        ).pack(fill="x", pady=4)
+        ctk.CTkLabel(
+            fr,
+            text="chat/discord/whatsapp/email/720p/1080p\nbalanced/quality/fast_gpu",
+            wraplength=250,
+            justify="left",
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w")
         ctk.CTkLabel(fr, text="Image quality / max edge / audio bitrate").pack(anchor="w")
         ctk.CTkEntry(fr, textvariable=self.var_quality).pack(fill="x", pady=2)
         ctk.CTkEntry(fr, textvariable=self.var_max_edge).pack(fill="x", pady=2)
@@ -355,20 +383,73 @@ class ClipworkApp(_CTkBase):
         ctk.CTkCheckBox(fr, text="Re-encode (frame-accurate)", variable=self.var_reencode).pack(
             anchor="w", pady=4
         )
-        ctk.CTkButton(fr, text="Go to In", command=lambda: self._goto_mark("in")).pack(fill="x", pady=2)
+        ctk.CTkButton(fr, text="Go to In", command=lambda: self._goto_mark("in")).pack(
+            fill="x", pady=2
+        )
         ctk.CTkButton(fr, text="Go to Out", command=lambda: self._goto_mark("out")).pack(
             fill="x", pady=2
         )
+
+        fr = self._panels["Edit"]
+        ctk.CTkLabel(fr, text="Action").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr,
+            variable=self.var_edit_action,
+            values=[
+                "crop",
+                "volume",
+                "speed",
+                "gif",
+                "fade",
+                "flip",
+                "target_size",
+                "burn_subs",
+                "logo",
+            ],
+        ).pack(fill="x", pady=4)
+        ctk.CTkLabel(fr, text="Crop margin (px)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_crop_margin).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Volume (1.0 = normal)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_volume).pack(fill="x", pady=2)
+        ctk.CTkCheckBox(fr, text="Mute", variable=self.var_mute).pack(anchor="w", pady=2)
+        ctk.CTkLabel(fr, text="Speed").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr, variable=self.var_speed, values=list(ops.SPEED_PRESETS)
+        ).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="GIF format / fade in-out (s) / max MB").pack(anchor="w")
+        ctk.CTkOptionMenu(fr, variable=self.var_gif_fmt, values=["gif", "webp"]).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkEntry(fr, textvariable=self.var_fade_in).pack(fill="x", pady=2)
+        ctk.CTkEntry(fr, textvariable=self.var_fade_out).pack(fill="x", pady=2)
+        ctk.CTkEntry(fr, textvariable=self.var_max_mb).pack(fill="x", pady=2)
+        ctk.CTkButton(fr, text="Choose subtitle .srt…", command=self._pick_srt).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkButton(fr, text="Choose logo image…", command=self._pick_logo).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkOptionMenu(
+            fr,
+            variable=self.var_logo_pos,
+            values=["top-right", "top-left", "bottom-right", "bottom-left", "center"],
+        ).pack(fill="x", pady=2)
+        ctk.CTkEntry(fr, textvariable=self.var_logo_scale).pack(fill="x", pady=2)
+        self.edit_files_label = ctk.CTkLabel(
+            fr, text="No .srt / logo chosen", text_color=("gray40", "gray60"), wraplength=250
+        )
+        self.edit_files_label.pack(anchor="w", pady=4)
 
         fr = self._panels["Audio"]
         ctk.CTkOptionMenu(
             fr,
             variable=self.var_audio_action,
-            values=["extract", "convert", "normalize", "mono", "compress"],
+            values=["extract", "convert", "normalize", "mono", "compress", "volume"],
         ).pack(fill="x", pady=4)
         ctk.CTkOptionMenu(fr, variable=self.var_audio_fmt, values=list(ops.AUDIO_FORMATS)).pack(
             fill="x", pady=4
         )
+        ctk.CTkEntry(fr, textvariable=self.var_volume).pack(fill="x", pady=2)
 
         fr = self._panels["Image"]
         ctk.CTkOptionMenu(
@@ -383,16 +464,42 @@ class ClipworkApp(_CTkBase):
         ctk.CTkOptionMenu(
             fr,
             variable=self.var_more,
-            values=["remux", "strip_audio", "frame", "rotate_video", "concat"],
+            values=["remux", "strip_audio", "frame", "rotate_video", "flip_video", "concat"],
         ).pack(fill="x", pady=4)
         ctk.CTkLabel(
             fr,
-            text="frame uses current playhead.\nconcat uses all videos in the list.",
+            text="frame uses playhead.\nconcat uses all videos in the list.",
             wraplength=260,
             justify="left",
         ).pack(anchor="w")
 
         self._on_tool_change("Trim")
+
+    def _pick_srt(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Subtitle file",
+            filetypes=[("SubRip", "*.srt"), ("All", "*.*")],
+        )
+        if p:
+            self._srt_path = Path(p)
+            self._update_edit_files_label()
+
+    def _pick_logo(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Logo image",
+            filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp"), ("All", "*.*")],
+        )
+        if p:
+            self._logo_path = Path(p)
+            self._update_edit_files_label()
+
+    def _update_edit_files_label(self) -> None:
+        parts = []
+        if self._srt_path:
+            parts.append(f"SRT: {self._srt_path.name}")
+        if self._logo_path:
+            parts.append(f"Logo: {self._logo_path.name}")
+        self.edit_files_label.configure(text=" · ".join(parts) if parts else "No .srt / logo chosen")
 
     def _on_tool_change(self, name: str) -> None:
         for n, fr in self._panels.items():
@@ -766,6 +873,22 @@ class ClipworkApp(_CTkBase):
                 return initial_dir, f"{stem}_noexif{src.suffix or '.jpg'}", image_ft
             return initial_dir, f"{stem}_edit{src.suffix or '.png'}", image_ft
 
+        if tool == "Edit":
+            act = self.var_edit_action.get()
+            if act == "gif":
+                fmt = self.var_gif_fmt.get() or "gif"
+                return initial_dir, f"{stem}_clip.{fmt}", [
+                    ("GIF", "*.gif"),
+                    ("WebP", "*.webp"),
+                    ("All files", "*.*"),
+                ]
+            if act == "target_size":
+                return initial_dir, f"{stem}_sized.mp4", video_ft
+            if act in ("crop", "speed", "fade", "flip", "volume", "burn_subs", "logo"):
+                tag = act
+                return initial_dir, f"{stem}_{tag}{src.suffix or '.mp4'}", video_ft + audio_ft
+            return initial_dir, f"{stem}_edit{src.suffix or '.mp4'}", video_ft
+
         more = self.var_more.get()
         if more == "remux":
             return initial_dir, f"{stem}_remux.mp4", video_ft
@@ -775,6 +898,8 @@ class ClipworkApp(_CTkBase):
             return initial_dir, f"{stem}_frame.jpg", image_ft
         if more == "rotate_video":
             return initial_dir, f"{stem}_rot.mp4", video_ft
+        if more == "flip_video":
+            return initial_dir, f"{stem}_flip.mp4", video_ft
         return initial_dir, f"{stem}_export{src.suffix or '.mp4'}", video_ft + audio_ft + image_ft
 
     def _ask_save_path(self, tool: str, src: Path | None) -> Path | None:
@@ -802,15 +927,40 @@ class ClipworkApp(_CTkBase):
         self._remember_output_dir(dest)
         return dest
 
+    def _ask_output_folder(self) -> Path | None:
+        prefs = app_prefs.load_prefs()
+        last = str(prefs.get("last_output_dir") or "")
+        initial = last if last and Path(last).is_dir() else str(Path.home())
+        path_str = filedialog.askdirectory(
+            parent=self, title="Choose folder for batch exports", initialdir=initial
+        )
+        if not path_str:
+            return None
+        folder = Path(path_str)
+        try:
+            data = app_prefs.load_prefs()
+            data["last_output_dir"] = str(folder)
+            app_prefs.save_prefs(data)
+        except Exception:
+            pass
+        return folder
+
     def _run(self) -> None:
         if self._busy:
             return
         src = self._current_path()
         tool = self.tool.get()
+        batch = bool(self.var_batch.get()) and tool != "More"
+
         if tool == "More" and self.var_more.get() == "concat":
             files = [p for p in self._files if p.suffix.lower() in VIDEO_EXTS]
             if len(files) < 2:
                 messagebox.showwarning(__app_name__, "Add at least two videos for concat.")
+                return
+            batch = False
+        elif batch:
+            if not self._files:
+                messagebox.showwarning(__app_name__, "Add files to the list for batch export.")
                 return
         elif not src:
             messagebox.showwarning(__app_name__, "Select a media file first.")
@@ -823,25 +973,223 @@ class ClipworkApp(_CTkBase):
                 messagebox.showerror(__app_name__, "ffmpeg not found (required for video/audio).")
                 return
 
-        dest = self._ask_save_path(tool, src)
-        if dest is None:
-            self._set_status("Export cancelled")
-            return
+        if batch:
+            dest_folder = self._ask_output_folder()
+            if dest_folder is None:
+                self._set_status("Export cancelled")
+                return
+            dest: Path | None = dest_folder
+        else:
+            dest = self._ask_save_path(tool, src)
+            if dest is None:
+                self._set_status("Export cancelled")
+                return
 
         self._busy = True
         self._session.stop()
         self.btn_play.configure(text="Play")
-        self._set_status(f"Exporting to {dest.name}…")
+        label = dest.name if dest else "…"
+        self._set_status(f"Exporting to {label}…")
         self._set_progress(0.02, "Starting…")
 
         def work() -> None:
             try:
-                lines = self._export_worker(tool, src, dest)
+                if batch:
+                    lines = self._export_batch(tool, list(self._files), dest)  # type: ignore[arg-type]
+                else:
+                    lines = self._export_worker(tool, src, dest)  # type: ignore[arg-type]
                 self.after(0, lambda: self._export_done(True, lines))
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: self._export_done(False, [str(exc)]))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _batch_runner_for_tool(self, tool: str) -> tuple[str, str, Any]:
+        """Return (op_name, name_tag, callable(src, dest)->Path) for batch."""
+        if tool == "Compress":
+            preset = self.var_preset.get() or "balanced"
+
+            def run(src: Path, dest: Path) -> Path:
+                ext = src.suffix.lower()
+                if ext in IMAGE_EXTS:
+                    return ops.compress_image(
+                        src,
+                        dest,
+                        quality=int(self.var_quality.get() or 75),
+                        max_edge=int(self.var_max_edge.get() or 1920),
+                    )
+                if ext in AUDIO_EXTS:
+                    return ops.compress_audio(
+                        src, dest, bitrate=self.var_bitrate.get() or "128k"
+                    )
+                return ops.compress_video(src, dest, preset=preset)
+
+            return "compress", f"compress_{preset}", run
+
+        if tool == "Convert":
+            fmt = self.var_fmt.get() or "mp4"
+
+            def run(src: Path, dest: Path) -> Path:
+                ext = src.suffix.lower()
+                if ext in IMAGE_EXTS or fmt in ("png", "jpg", "webp"):
+                    f = fmt if fmt in ("png", "jpg", "webp") else "png"
+                    return ops.convert_image(src, dest, fmt=f)
+                if ext in AUDIO_EXTS or fmt in ops.AUDIO_FORMATS:
+                    f = fmt if fmt in ops.AUDIO_FORMATS else "mp3"
+                    return ops.convert_audio(src, dest, fmt=f)
+                f = fmt if fmt in ops.VIDEO_FORMATS else "mp4"
+                return ops.convert_video(src, dest, fmt=f)
+
+            return "convert", "convert", run
+
+        if tool == "Trim":
+            start = self._session.in_point
+            end = self._session.out_or_end
+            reenc = bool(self.var_reencode.get())
+
+            def run(src: Path, dest: Path) -> Path:
+                return ops.trim_media(
+                    src, dest, start=start, end=end if end else None, reencode=reenc
+                )
+
+            return "trim", "trim", run
+
+        if tool == "Edit":
+            return self._batch_edit_runner()
+
+        if tool == "Audio":
+            act = self.var_audio_action.get()
+            fmt = self.var_audio_fmt.get() or "mp3"
+            vol = float(self.var_volume.get() or 1.0)
+
+            def run(src: Path, dest: Path) -> Path:
+                if act == "extract":
+                    return ops.extract_audio(src, dest, fmt=fmt)
+                if act == "normalize":
+                    return ops.normalize_audio(src, dest)
+                if act == "mono":
+                    return ops.to_mono(src, dest)
+                if act == "volume":
+                    return ops.adjust_volume(src, dest, volume=vol)
+                if act == "compress":
+                    return ops.compress_audio(
+                        src, dest, bitrate=self.var_bitrate.get() or "128k"
+                    )
+                return ops.convert_audio(src, dest, fmt=fmt)
+
+            return f"audio_{act}", act, run
+
+        if tool == "Image":
+            act = self.var_image_action.get()
+
+            def run(src: Path, dest: Path) -> Path:
+                if act == "compress":
+                    return ops.compress_image(
+                        src,
+                        dest,
+                        quality=int(self.var_quality.get() or 75),
+                        max_edge=int(self.var_max_edge.get() or 1920),
+                    )
+                if act == "resize":
+                    return ops.resize_image(
+                        src, dest, max_edge=int(self.var_max_edge.get() or 1920)
+                    )
+                if act == "rotate":
+                    return ops.rotate_image(
+                        src, dest, degrees=int(self.var_degrees.get() or 90)
+                    )
+                if act == "flip":
+                    return ops.flip_image(src, dest)
+                if act == "strip_exif":
+                    return ops.strip_exif(src, dest)
+                if act == "to_pdf":
+                    return ops.images_to_pdf([src], dest)
+                return ops.convert_image(src, dest, fmt="png")
+
+            return f"image_{act}", act, run
+
+        raise RuntimeError(f"Batch not supported for tool: {tool}")
+
+    def _batch_edit_runner(self) -> tuple[str, str, Any]:
+        act = self.var_edit_action.get()
+        margin = int(self.var_crop_margin.get() or 0)
+        vol = float(self.var_volume.get() or 1.0)
+        mute = bool(self.var_mute.get())
+        speed = float(self.var_speed.get() or 1.0)
+        fi = float(self.var_fade_in.get() or 0.5)
+        fo = float(self.var_fade_out.get() or 0.5)
+        max_mb = float(self.var_max_mb.get() or 25)
+        start = self._session.in_point
+        end = self._session.out_or_end
+        gif_fmt = self.var_gif_fmt.get() or "gif"
+
+        def run(src: Path, dest: Path) -> Path:
+            if act == "crop":
+                return ops.crop_video(src, dest, margin=margin)
+            if act == "volume":
+                return ops.adjust_volume(src, dest, volume=vol, mute=mute)
+            if act == "speed":
+                return ops.change_speed(src, dest, speed=speed)
+            if act == "gif":
+                return ops.export_gif(
+                    src, dest, start=start, end=end if end else None, fmt=gif_fmt
+                )
+            if act == "fade":
+                return ops.fade_media(src, dest, fade_in=fi, fade_out=fo)
+            if act == "flip":
+                return ops.flip_video(src, dest, horizontal=True)
+            if act == "target_size":
+                return ops.target_size_video(src, dest, max_mb=max_mb)
+            if act == "burn_subs":
+                if not self._srt_path:
+                    raise RuntimeError("Choose a .srt subtitle file first")
+                return ops.burn_subtitles(src, self._srt_path, dest)
+            if act == "logo":
+                if not self._logo_path:
+                    raise RuntimeError("Choose a logo image first")
+                return ops.logo_overlay(
+                    src,
+                    self._logo_path,
+                    dest,
+                    position=self.var_logo_pos.get() or "top-right",
+                    scale=float(self.var_logo_scale.get() or 0.15),
+                )
+            raise RuntimeError(f"Unknown edit action: {act}")
+
+        return f"edit_{act}", act, run
+
+    def _export_batch(self, tool: str, files: list[Path], out_dir: Path) -> list[str]:
+        op_name, tag, run_one = self._batch_runner_for_tool(tool)
+        total = len(files)
+
+        def on_prog(i: int, n: int, name: str) -> None:
+            self.after(
+                0,
+                lambda: self._set_progress(
+                    i / max(n, 1), f"Batch {i}/{n}: {name}"
+                ),
+            )
+
+        results = ops.batch_to_folder(
+            files,
+            out_dir,
+            op_name=op_name,
+            run_one=run_one,
+            name_tag=tag,
+            on_progress=on_prog,
+        )
+        lines: list[str] = []
+        ok_n = 0
+        for r in results:
+            if r["ok"]:
+                ok_n += 1
+                lines.append(str(r["dest"]))
+            else:
+                lines.append(f"FAIL {Path(r['src']).name}: {r['error']}")
+        lines.insert(0, f"Batch done: {ok_n}/{total} ok → {out_dir}")
+        if ok_n == 0:
+            raise RuntimeError("All batch jobs failed")
+        return lines
 
     def _export_worker(self, tool: str, src: Path | None, dest: Path) -> list[str]:
         results: list[str] = []
@@ -974,6 +1322,84 @@ class ClipworkApp(_CTkBase):
                 ),
             )
 
+        if tool == "Edit":
+            act = self.var_edit_action.get()
+            if act == "crop":
+                return go(
+                    "crop",
+                    lambda: ops.crop_video(
+                        src, dest, margin=int(self.var_crop_margin.get() or 0)
+                    ),
+                )
+            if act == "volume":
+                return go(
+                    "volume",
+                    lambda: ops.adjust_volume(
+                        src,
+                        dest,
+                        volume=float(self.var_volume.get() or 1.0),
+                        mute=bool(self.var_mute.get()),
+                    ),
+                )
+            if act == "speed":
+                return go(
+                    "speed",
+                    lambda: ops.change_speed(
+                        src, dest, speed=float(self.var_speed.get() or 1.0)
+                    ),
+                )
+            if act == "gif":
+                return go(
+                    "gif",
+                    lambda: ops.export_gif(
+                        src,
+                        dest,
+                        start=self._session.in_point,
+                        end=self._session.out_or_end or None,
+                        fmt=self.var_gif_fmt.get() or "gif",
+                    ),
+                )
+            if act == "fade":
+                return go(
+                    "fade",
+                    lambda: ops.fade_media(
+                        src,
+                        dest,
+                        fade_in=float(self.var_fade_in.get() or 0.5),
+                        fade_out=float(self.var_fade_out.get() or 0.5),
+                    ),
+                )
+            if act == "flip":
+                return go("flip", lambda: ops.flip_video(src, dest, horizontal=True))
+            if act == "target_size":
+                return go(
+                    "target_size",
+                    lambda: ops.target_size_video(
+                        src, dest, max_mb=float(self.var_max_mb.get() or 25)
+                    ),
+                )
+            if act == "burn_subs":
+                if not self._srt_path:
+                    raise RuntimeError("Choose a .srt subtitle file first")
+                return go(
+                    "burn_subs",
+                    lambda: ops.burn_subtitles(src, self._srt_path, dest),  # type: ignore[arg-type]
+                )
+            if act == "logo":
+                if not self._logo_path:
+                    raise RuntimeError("Choose a logo image first")
+                return go(
+                    "logo",
+                    lambda: ops.logo_overlay(
+                        src,
+                        self._logo_path,  # type: ignore[arg-type]
+                        dest,
+                        position=self.var_logo_pos.get() or "top-right",
+                        scale=float(self.var_logo_scale.get() or 0.15),
+                    ),
+                )
+            raise RuntimeError(f"Unknown edit action: {act}")
+
         if tool == "Audio":
             act = self.var_audio_action.get()
             fmt = self.var_audio_fmt.get() or "mp3"
@@ -992,6 +1418,13 @@ class ClipworkApp(_CTkBase):
                 return go("normalize", lambda: ops.normalize_audio(src, dest))
             if act == "mono":
                 return go("mono", lambda: ops.to_mono(src, dest))
+            if act == "volume":
+                return go(
+                    "volume",
+                    lambda: ops.adjust_volume(
+                        src, dest, volume=float(self.var_volume.get() or 1.0)
+                    ),
+                )
             return go(
                 "compress_audio",
                 lambda: ops.compress_audio(src, dest, bitrate=self.var_bitrate.get() or "128k"),
@@ -1050,6 +1483,8 @@ class ClipworkApp(_CTkBase):
                     src, dest, degrees=int(self.var_degrees.get() or 90)
                 ),
             )
+        if more == "flip_video":
+            return go("flip_video", lambda: ops.flip_video(src, dest, horizontal=True))
         raise RuntimeError(f"Unknown action: {more}")
 
     def _export_done(self, ok: bool, lines: list[str]) -> None:

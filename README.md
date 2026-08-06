@@ -17,13 +17,15 @@ Requires **ffmpeg** + **ffplay** on PATH (or under `vendor/`) for video/audio wo
 
 | Area | Tools |
 |------|--------|
-| **Visual editor** | Video preview with sound, smoother frame playback, audio waveform, play/pause, timeline scrub, In/Out, export progress |
-| **Video** | Convert, compress presets, trim (from In/Out), remux, rotate, strip audio, frame grab, concat |
-| **Audio** | Convert, compress, extract from video, normalize, mono |
-| **Image** | Convert, resize, compress, rotate, flip, strip EXIF, images→PDF |
-| **CLI** | Same transform toolkit from the command line |
+| **Visual editor** | Preview with sound, timeline scrub, In/Out, export progress, Save As / batch folder |
+| **Convert / Compress** | Formats + share presets (chat, Discord, WhatsApp, email, 720p, 1080p, quality, fast_gpu) |
+| **Trim** | From timeline In/Out |
+| **Edit** | Crop, volume/mute, speed, GIF/WebP clip, fade, flip, target size (MB), burn SRT, logo overlay |
+| **Audio / Image / More** | Extract, normalize, mono, remux, strip audio, frame grab, rotate, concat |
+| **Batch** | Same action on all listed files → choose output folder |
+| **CLI** | Full toolkit (`crop`, `volume`, `speed`, `gif`, `fade`, `flip`, `target-size`, `burn-subs`, `logo`, …) |
 
-Single-file focused editing (not a multi-track NLE or effects suite).
+Single-file (and batch) toolkit — not a multi-track NLE.
 
 See [docs/LIMITS.md](docs/LIMITS.md).
 

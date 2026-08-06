@@ -2,9 +2,9 @@
 
 ## What it is
 
-Offline **visual media editor** for common convert / compress / trim jobs: preview, timeline scrub, In/Out, export progress.
+Offline **visual media editor** for convert / compress / trim / light edit jobs: preview, timeline, In/Out, Save As, batch-to-folder, share presets, crop/volume/speed/GIF/fade/flip, approximate size target, SRT burn-in, logo overlay.
 
-Not a multi-track NLE, color grading suite, or DAW.
+Not a multi-track NLE, color grading suite, screen recorder, or stream downloader.
 
 ## Preview
 

@@ -13,10 +13,18 @@ from clipwork.media_ops.ffmpeg_util import (
 
 # Container / codec presets (keep small — low upkeep).
 VIDEO_FORMATS = ("mp4", "webm", "mkv", "mov", "avi")
+# Share / quality presets: crf + optional scale (W:-2 keeps even height) + audio bitrate.
 COMPRESS_PRESETS = {
     "chat": {"crf": "28", "scale": "1280:-2", "audio_k": "96k"},
+    "discord": {"crf": "28", "scale": "1280:-2", "audio_k": "96k"},
+    "whatsapp": {"crf": "28", "scale": "720:-2", "audio_k": "96k"},
+    "email": {"crf": "30", "scale": "854:-2", "audio_k": "80k"},
+    "720p": {"crf": "23", "scale": "1280:-2", "audio_k": "128k"},
+    "1080p": {"crf": "22", "scale": "1920:-2", "audio_k": "160k"},
     "balanced": {"crf": "23", "scale": None, "audio_k": "128k"},
     "quality": {"crf": "18", "scale": None, "audio_k": "192k"},
+    # GPU when available (falls back handled by caller if encode fails)
+    "fast_gpu": {"crf": "23", "scale": "1920:-2", "audio_k": "128k", "gpu": True},
 }
 
 
@@ -112,9 +120,38 @@ def compress_video(
         out = default_output(src, ".mp4", f"compress_{preset}")
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    use_gpu = bool(cfg.get("gpu"))
+    scale = cfg.get("scale")
+    vf = f"scale={scale}" if scale else None
+
+    if use_gpu:
+        # Try common hardware encoders; fall back to libx264 on failure.
+        for vcodec, extra in (
+            ("h264_nvenc", ["-preset", "p4", "-cq", cfg["crf"]]),
+            ("h264_qsv", ["-global_quality", cfg["crf"]]),
+            ("h264_amf", ["-quality", "balanced", "-rc", "cqp", "-qp_i", cfg["crf"]]),
+        ):
+            args = ["-i", str(src)]
+            if vf:
+                args.extend(["-vf", vf])
+            args.extend(["-c:v", vcodec, *extra, "-c:a", "aac", "-b:a", cfg["audio_k"]])
+            args.extend(["-movflags", "+faststart", str(out)])
+            try:
+                run_ffmpeg(args)
+                warn(f"Used hardware encoder: {vcodec}")
+                return out
+            except Exception:
+                if out.exists():
+                    try:
+                        out.unlink()
+                    except OSError:
+                        pass
+                continue
+        warn("GPU encode unavailable; using CPU libx264.")
+
     args = ["-i", str(src), "-c:v", "libx264", "-preset", "medium", "-crf", cfg["crf"]]
-    if cfg["scale"]:
-        args.extend(["-vf", f"scale={cfg['scale']}"])
+    if vf:
+        args.extend(["-vf", vf])
     args.extend(["-c:a", "aac", "-b:a", cfg["audio_k"], "-movflags", "+faststart", str(out)])
     run_ffmpeg(args)
     return out
