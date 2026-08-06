@@ -7,10 +7,14 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _WARNINGS: list[str] = []
+_PROC_LOCK = threading.Lock()
+_CURRENT_PROC: subprocess.Popen[str] | None = None
+_CANCEL_REQUESTED = False
 
 
 def take_warnings() -> list[str]:
@@ -95,30 +99,123 @@ def require_ffprobe() -> Path:
     return p
 
 
+def request_cancel() -> None:
+    """Ask any in-flight ffmpeg process to stop."""
+    global _CANCEL_REQUESTED, _CURRENT_PROC
+    _CANCEL_REQUESTED = True
+    with _PROC_LOCK:
+        proc = _CURRENT_PROC
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def clear_cancel() -> None:
+    global _CANCEL_REQUESTED
+    _CANCEL_REQUESTED = False
+
+
+def cancel_requested() -> bool:
+    return _CANCEL_REQUESTED
+
+
+class CancelledError(RuntimeError):
+    """Raised when the user cancels an ffmpeg job."""
+
+
 def run_ffmpeg(
     args: list[str],
     *,
     timeout: float | None = None,
     check: bool = True,
+    on_progress: Callable[[float, str], None] | None = None,
+    duration_hint: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run ffmpeg; supports cancel via request_cancel() and optional progress."""
+    global _CURRENT_PROC
+    clear_cancel()
     ffmpeg = str(require_ffmpeg())
-    cmd = [ffmpeg, "-hide_banner", "-y", *args]
+    # Always enable progress pipe when callback provided
+    if on_progress is not None:
+        cmd = [ffmpeg, "-hide_banner", "-y", "-progress", "pipe:1", "-nostats", *args]
+    else:
+        cmd = [ffmpeg, "-hide_banner", "-y", *args]
+
+    creation = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creation = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE if on_progress else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creation,
+    )
+    with _PROC_LOCK:
+        _CURRENT_PROC = proc
+
+    stdout_data = ""
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ffmpeg timed out: {' '.join(args[:8])}…") from exc
-    if check and proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
-        tail = err[-2000:] if len(err) > 2000 else err
+        if on_progress and proc.stdout is not None:
+            out_time_ms = 0
+            for line in proc.stdout:
+                if _CANCEL_REQUESTED:
+                    proc.kill()
+                    break
+                line = line.strip()
+                if line.startswith("out_time_ms="):
+                    try:
+                        out_time_ms = int(line.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                    if duration_hint and duration_hint > 0:
+                        t = out_time_ms / 1_000_000.0
+                        on_progress(min(0.99, max(0.0, t / duration_hint)), f"{t:.1f}s")
+                elif line == "progress=end":
+                    on_progress(1.0, "done")
+            proc.wait(timeout=timeout)
+        else:
+            try:
+                _, err = proc.communicate(timeout=timeout)
+                stdout_data = err or ""
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                raise RuntimeError(f"ffmpeg timed out: {' '.join(args[:8])}…") from exc
+    finally:
+        with _PROC_LOCK:
+            if _CURRENT_PROC is proc:
+                _CURRENT_PROC = None
+
+    if _CANCEL_REQUESTED:
+        raise CancelledError("Export cancelled")
+
+    stderr = ""
+    if proc.stderr and not stdout_data:
+        try:
+            stderr = proc.stderr.read() or ""
+        except Exception:
+            stderr = ""
+    elif stdout_data:
+        stderr = stdout_data
+
+    if check and proc.returncode not in (0, None) and proc.returncode != 0:
+        # cancelled processes may be non-zero
+        if _CANCEL_REQUESTED:
+            raise CancelledError("Export cancelled")
+        tail = (stderr or "").strip()
+        tail = tail[-2000:] if len(tail) > 2000 else tail
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {tail}")
-    return proc
+
+    return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout="", stderr=stderr)
 
 
 def probe(path: Path | str) -> dict[str, Any]:

@@ -17,7 +17,7 @@ Requires **ffmpeg** + **ffplay** on PATH (or under `vendor/`) for video/audio wo
 
 | Area | Tools |
 |------|--------|
-| **Visual editor** | Preview with sound, timeline scrub, In/Out, export progress, Save As / batch folder |
+| **Visual editor** | Preview + sound, **draggable In/Out range timeline**, time fields, play selection, frame step, keyboard shortcuts, crop overlay, logo ghost, zoom, cancel export, open folder, batch queue |
 | **Convert / Compress** | Formats + share presets (chat, Discord, WhatsApp, email, 720p, 1080p, quality, fast_gpu) |
 | **Trim** | From timeline In/Out |
 | **Edit** | Crop, volume/mute, speed, GIF/WebP clip, fade, flip, target size (MB), burn SRT, logo overlay |

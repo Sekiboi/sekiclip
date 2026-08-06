@@ -2,7 +2,7 @@
 
 ## What it is
 
-Offline **visual media editor** for convert / compress / trim / light edit jobs: preview, timeline, In/Out, Save As, batch-to-folder, share presets, crop/volume/speed/GIF/fade/flip, approximate size target, SRT burn-in, logo overlay.
+Offline **visual media editor** for convert / compress / trim / light edit jobs: preview, **range timeline** (drag In/Out), typed times, play selection, crop overlay, cancelable exports, batch queue, share presets, volume/speed/GIF/fade/flip, size target, SRT burn-in, logo overlay.
 
 Not a multi-track NLE, color grading suite, screen recorder, or stream downloader.
 

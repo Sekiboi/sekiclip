@@ -159,6 +159,7 @@ class MediaSession:
         self._waveform: Image.Image | None = None
         self._ffplay_proc: subprocess.Popen[str] | None = None
         self._playing = False
+        self._loop_selection = False
         self._play_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._play_gen = 0  # bump to cancel in-flight play
@@ -436,7 +437,15 @@ class MediaSession:
     def playing(self) -> bool:
         return self._playing
 
-    def play(self) -> None:
+    def frame_step(self, delta: int = 1) -> float:
+        """Step playhead by N frames (paused). Returns new time."""
+        self.stop()
+        fps = max(self._fps, 1.0)
+        t = self.position + (delta / fps)
+        self.seek(t, emit=True)
+        return self.position
+
+    def play(self, *, selection_only: bool = False, loop: bool = False) -> None:
         if self._playing or not self.info:
             return
         if self.info.kind == MediaKind.IMAGE:
@@ -445,20 +454,32 @@ class MediaSession:
         self._play_gen += 1
         gen = self._play_gen
         self._playing = True
-        start_at = self.position
-        end_at = self.out_or_end if self.out_or_end > 0 else 1e9
-        if start_at >= end_at - 0.05:
+        self._loop_selection = bool(loop)
+
+        if selection_only:
             start_at = self.in_point
+            end_at = self.out_or_end if self.out_or_end > 0 else self.duration
             self.seek(start_at, emit=True)
+        else:
+            start_at = self.position
+            end_at = self.out_or_end if self.out_or_end > 0 else 1e9
+            if start_at >= end_at - 0.05:
+                start_at = self.in_point
+                self.seek(start_at, emit=True)
 
         self._play_thread = threading.Thread(
             target=self._play_loop, args=(gen, start_at, end_at), daemon=True
         )
         self._play_thread.start()
 
+    def play_selection(self, *, loop: bool = True) -> None:
+        """Play only In→Out (loops by default for review)."""
+        self.play(selection_only=True, loop=loop)
+
     def stop(self) -> None:
         self._playing = False
         self._play_gen += 1
+        self._loop_selection = False
         self._stop_audio()
         t = self._play_thread
         if t and t.is_alive() and t is not threading.current_thread():
@@ -553,6 +574,23 @@ class MediaSession:
             elapsed = time.perf_counter() - wall0
             target = start_at + elapsed
             if target >= end_at:
+                if self._loop_selection and gen == self._play_gen:
+                    # Restart selection loop
+                    start_at = self.in_point
+                    end_at = self.out_or_end if self.out_or_end > 0 else self.duration
+                    wall0 = time.perf_counter()
+                    self.seek(start_at, emit=False)
+                    self._start_audio(start_at, end_at if end_at < 1e8 else None)
+                    with self._lock:
+                        if self._cap is not None:
+                            try:
+                                import cv2
+
+                                frame_idx = int(round(start_at * fps))
+                                self._cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
+                            except Exception:
+                                pass
+                    continue
                 self.position = end_at if end_at < 1e9 else self.position
                 try:
                     self.seek(self.position, emit=True)
@@ -635,37 +673,13 @@ def run_ffmpeg_with_progress(
     on_progress: Callable[[float, str], None] | None = None,
     timeout: float | None = None,
 ) -> None:
-    """Run ffmpeg with -progress pipe:1 and report 0..1 progress."""
-    ffmpeg = str(require_ffmpeg())
-    cmd = [ffmpeg, "-hide_banner", "-y", "-progress", "pipe:1", "-nostats", *args]
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+    """Run ffmpeg with progress + cancel support."""
+    from clipwork.media_ops.ffmpeg_util import run_ffmpeg as _run
+
+    _run(
+        args,
+        timeout=timeout,
+        check=True,
+        on_progress=on_progress,
+        duration_hint=duration_hint,
     )
-    assert proc.stdout is not None
-    out_time_ms = 0
-    try:
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_ms="):
-                try:
-                    out_time_ms = int(line.split("=", 1)[1])
-                except ValueError:
-                    pass
-                if on_progress and duration_hint and duration_hint > 0:
-                    t = out_time_ms / 1_000_000.0
-                    on_progress(min(0.99, max(0.0, t / duration_hint)), format_time(t))
-            elif line == "progress=end":
-                if on_progress:
-                    on_progress(1.0, "done")
-        rc = proc.wait(timeout=timeout)
-    except Exception:
-        proc.kill()
-        raise
-    if rc != 0:
-        err = (proc.stderr.read() if proc.stderr else "") or ""
-        raise RuntimeError(f"ffmpeg failed ({rc}): {err[-1500:]}")

@@ -21,10 +21,12 @@ from clipwork.media_ops.edit import (
     target_size_video,
 )
 from clipwork.media_ops.ffmpeg_util import (
+    CancelledError,
     find_ffmpeg,
     find_ffprobe,
     media_summary,
     probe,
+    request_cancel,
     take_warnings,
     unique_path,
 )
@@ -56,6 +58,7 @@ from clipwork.media_ops.video import (
 __all__ = [
     "AUDIO_FORMATS",
     "COMPRESS_PRESETS",
+    "CancelledError",
     "IMAGE_EXTS",
     "SPEED_PRESETS",
     "VIDEO_FORMATS",
@@ -86,6 +89,7 @@ __all__ = [
     "normalize_audio",
     "probe",
     "remux",
+    "request_cancel",
     "resize_image",
     "rotate_image",
     "rotate_video",

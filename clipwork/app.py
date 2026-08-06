@@ -6,6 +6,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Any
 
@@ -16,12 +17,13 @@ from clipwork import jobs
 from clipwork import media_ops as ops
 from clipwork import prefs as app_prefs
 from clipwork.diagnostics import build_report
+from clipwork.media_ops.ffmpeg_util import CancelledError, request_cancel
 from clipwork.media_preview import (
-    MediaKind,
     MediaSession,
     format_time,
     run_ffmpeg_with_progress,
 )
+from clipwork.timeline_widget import RangeTimeline
 
 try:
     import customtkinter as ctk
@@ -129,9 +131,17 @@ class ClipworkApp(_CTkBase):
         self._preview_photo = None  # keep ref (CTkImage or PhotoImage)
         self._scrub_dragging = False
         self._updating_scrub = False
+        self._export_proc_active = False
+        self._crop_mode = False
+        self._crop_rect = (0.1, 0.1, 0.9, 0.9)  # normalized L,T,R,B on content
+        self._crop_drag: str | None = None
+        self._logo_ghost = False
+        self._updating_time_fields = False
+        self._batch_queue_lines: list[str] = []
 
         self._build()
         self._set_icons()
+        self._bind_keys()
         self.after(200, self._maybe_first_run)
         self._refresh_ffmpeg_status()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -202,6 +212,10 @@ class ClipworkApp(_CTkBase):
         self.preview_label.place(relx=0.5, rely=0.5, anchor="center")
         # Optional native tk label fallback when CTkImage is unhappy
         self._tk_preview = None
+        # Crop drag on preview
+        self.preview_label.bind("<ButtonPress-1>", self._crop_press)
+        self.preview_label.bind("<B1-Motion>", self._crop_motion)
+        self.preview_label.bind("<ButtonRelease-1>", self._crop_release)
         if _HAS_DND:
             try:
                 self.preview_frame.drop_target_register(DND_FILES)
@@ -215,52 +229,112 @@ class ClipworkApp(_CTkBase):
         # Transport
         transport = ctk.CTkFrame(center, fg_color="transparent")
         transport.pack(fill="x", padx=10, pady=4)
-        self.btn_play = ctk.CTkButton(transport, text="Play", width=70, command=self._toggle_play)
+        self.btn_play = ctk.CTkButton(transport, text="Play", width=64, command=self._toggle_play)
         self.btn_play.pack(side="left", padx=2)
-        ctk.CTkButton(transport, text="Stop", width=60, command=self._stop).pack(side="left", padx=2)
-        self.time_label = ctk.CTkLabel(transport, text="00:00.00 / 00:00.00", width=140)
-        self.time_label.pack(side="left", padx=8)
+        ctk.CTkButton(transport, text="Stop", width=54, command=self._stop).pack(side="left", padx=2)
+        ctk.CTkButton(transport, text="|◀", width=40, command=lambda: self._frame_step(-1)).pack(
+            side="left", padx=1
+        )
+        ctk.CTkButton(transport, text="▶|", width=40, command=lambda: self._frame_step(1)).pack(
+            side="left", padx=1
+        )
+        ctk.CTkButton(
+            transport, text="Play sel.", width=72, command=self._play_selection
+        ).pack(side="left", padx=2)
+        self.time_label = ctk.CTkLabel(transport, text="00:00.00 / 00:00.00", width=130)
+        self.time_label.pack(side="left", padx=6)
+        ctk.CTkButton(transport, text="I", width=32, command=self._mark_in).pack(side="left", padx=1)
+        ctk.CTkButton(transport, text="O", width=32, command=self._mark_out).pack(side="left", padx=1)
+        ctk.CTkButton(transport, text="Clear", width=54, command=self._clear_io).pack(
+            side="left", padx=2
+        )
 
-        ctk.CTkButton(transport, text="[ In", width=50, command=self._mark_in).pack(side="left", padx=2)
-        ctk.CTkButton(transport, text="Out ]", width=50, command=self._mark_out).pack(
-            side="left", padx=2
+        # Editable In / Out / Duration
+        time_fr = ctk.CTkFrame(center, fg_color="transparent")
+        time_fr.pack(fill="x", padx=12, pady=2)
+        ctk.CTkLabel(time_fr, text="In").pack(side="left")
+        self.entry_in = ctk.CTkEntry(time_fr, width=88)
+        self.entry_in.pack(side="left", padx=4)
+        self.entry_in.bind("<Return>", lambda _e: self._apply_time_fields())
+        ctk.CTkLabel(time_fr, text="Out").pack(side="left", padx=(8, 0))
+        self.entry_out = ctk.CTkEntry(time_fr, width=88)
+        self.entry_out.pack(side="left", padx=4)
+        self.entry_out.bind("<Return>", lambda _e: self._apply_time_fields())
+        ctk.CTkLabel(time_fr, text="Dur").pack(side="left", padx=(8, 0))
+        self.entry_dur = ctk.CTkEntry(time_fr, width=88)
+        self.entry_dur.pack(side="left", padx=4)
+        self.entry_dur.bind("<Return>", lambda _e: self._apply_duration_field())
+        ctk.CTkButton(time_fr, text="Apply times", width=90, command=self._apply_time_fields).pack(
+            side="left", padx=6
         )
-        ctk.CTkButton(transport, text="Clear I/O", width=70, command=self._clear_io).pack(
-            side="left", padx=2
+        self.io_label = ctk.CTkLabel(
+            time_fr, text="Drag green/red handles on timeline", text_color=("gray40", "gray60")
         )
-        self.io_label = ctk.CTkLabel(transport, text="In 00:00 → Out end", text_color=("gray30", "gray70"))
         self.io_label.pack(side="left", padx=8)
 
-        # Scrubber
+        # Range timeline (visual In/Out/playhead)
         scrub_fr = ctk.CTkFrame(center, fg_color="transparent")
-        scrub_fr.pack(fill="x", padx=12, pady=(2, 4))
-        ctk.CTkLabel(scrub_fr, text="Timeline").pack(anchor="w")
-        self.scrub = ctk.CTkSlider(
-            scrub_fr, from_=0, to=1, number_of_steps=1000, command=self._on_scrub
+        scrub_fr.pack(fill="x", padx=12, pady=(2, 2))
+        tl_row = ctk.CTkFrame(scrub_fr, fg_color="transparent")
+        tl_row.pack(fill="x")
+        ctk.CTkLabel(tl_row, text="Timeline — drag green=In, red=Out, yellow=playhead").pack(
+            side="left"
         )
-        self.scrub.set(0)
-        self.scrub.pack(fill="x", pady=4)
-        self.scrub.bind("<ButtonPress-1>", lambda _e: setattr(self, "_scrub_dragging", True))
-        self.scrub.bind("<ButtonRelease-1>", self._on_scrub_release)
+        ctk.CTkButton(tl_row, text="−", width=32, command=lambda: self._zoom(1.4)).pack(
+            side="right", padx=2
+        )
+        ctk.CTkButton(tl_row, text="+", width=32, command=lambda: self._zoom(0.7)).pack(
+            side="right", padx=2
+        )
+        ctk.CTkButton(tl_row, text="Fit", width=44, command=self._zoom_fit).pack(side="right", padx=2)
+        ctk.CTkButton(tl_row, text="Sel", width=44, command=self._zoom_sel).pack(side="right", padx=2)
 
-        # Range indicators (text)
+        # Embed tk Canvas timeline
+        self._tl_host = tk.Frame(scrub_fr, bg="#1a1a1e", height=56)
+        self._tl_host.pack(fill="x", pady=4)
+        self.timeline = RangeTimeline(
+            self._tl_host,
+            on_change=self._on_timeline_change,
+            on_seek=self._on_timeline_seek,
+            height=56,
+            bg="#1a1a1e",
+        )
+        self.timeline.pack(fill="x", expand=True)
+
         self.range_label = ctk.CTkLabel(
             center,
-            text="Drag the timeline to scrub. Set In/Out for the region you will export.",
+            text="Space=play  I/O=marks  ←/→=frame  Drag handles to set trim range",
             text_color=("gray40", "gray60"),
             anchor="w",
         )
-        self.range_label.pack(fill="x", padx=12, pady=(0, 6))
+        self.range_label.pack(fill="x", padx=12, pady=(0, 4))
 
-        # Job progress
+        # Job progress + cancel
         prog_fr = ctk.CTkFrame(center, fg_color="transparent")
-        prog_fr.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkLabel(prog_fr, text="Export progress").pack(anchor="w")
+        prog_fr.pack(fill="x", padx=12, pady=(0, 4))
+        prow = ctk.CTkFrame(prog_fr, fg_color="transparent")
+        prow.pack(fill="x")
+        ctk.CTkLabel(prow, text="Export progress").pack(side="left")
+        self.btn_cancel = ctk.CTkButton(
+            prow, text="Cancel", width=70, command=self._cancel_export, state="disabled"
+        )
+        self.btn_cancel.pack(side="right")
+        self.btn_open_folder = ctk.CTkButton(
+            prow, text="Open folder", width=90, command=self._open_last_folder, state="disabled"
+        )
+        self.btn_open_folder.pack(side="right", padx=4)
         self.progress = ctk.CTkProgressBar(prog_fr)
         self.progress.set(0)
         self.progress.pack(fill="x", pady=2)
         self.progress_label = ctk.CTkLabel(prog_fr, text="Idle", anchor="w")
         self.progress_label.pack(fill="x")
+
+        # Batch queue list
+        self.queue_box = ctk.CTkTextbox(center, height=56)
+        self.queue_box.pack(fill="x", padx=12, pady=(0, 6))
+        self.queue_box.insert("1.0", "Batch queue appears here when exporting multiple files.\n")
+        self.queue_box.configure(state="disabled")
+        self._last_export_path: Path | None = None
 
         # Right: tools
         right = ctk.CTkFrame(main, width=300)
@@ -409,9 +483,21 @@ class ClipworkApp(_CTkBase):
         ).pack(fill="x", pady=4)
         ctk.CTkLabel(fr, text="Crop margin (px)").pack(anchor="w")
         ctk.CTkEntry(fr, textvariable=self.var_crop_margin).pack(fill="x", pady=2)
-        ctk.CTkLabel(fr, text="Volume (1.0 = normal)").pack(anchor="w")
-        ctk.CTkEntry(fr, textvariable=self.var_volume).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Volume").pack(anchor="w")
+        self.volume_slider = ctk.CTkSlider(
+            fr, from_=0, to=2.0, number_of_steps=40, command=self._on_volume_slider
+        )
+        self.volume_slider.set(1.0)
+        self.volume_slider.pack(fill="x", pady=2)
+        self.volume_label = ctk.CTkLabel(fr, text="100%")
+        self.volume_label.pack(anchor="w")
         ctk.CTkCheckBox(fr, text="Mute", variable=self.var_mute).pack(anchor="w", pady=2)
+        ctk.CTkButton(fr, text="Toggle crop overlay", command=self._toggle_crop_mode).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkButton(fr, text="Toggle logo ghost", command=self._toggle_logo_ghost).pack(
+            fill="x", pady=2
+        )
         ctk.CTkLabel(fr, text="Speed").pack(anchor="w")
         ctk.CTkOptionMenu(
             fr, variable=self.var_speed, values=list(ops.SPEED_PRESETS)
@@ -608,15 +694,14 @@ class ClipworkApp(_CTkBase):
 
     def _on_loaded(self, summary: str, duration: float) -> None:
         self.info_line.configure(text=summary)
-        self._set_status("Ready - scrub timeline, set In/Out, export")
-        self._updating_scrub = True
-        self.scrub.configure(to=max(duration, 0.001))
-        self.scrub.set(0)
-        self._updating_scrub = False
+        self._set_status("Ready — drag In/Out handles, then Export")
+        self.timeline.set_duration(max(duration, 0.001))
+        self._session.in_point = 0.0
+        self._session.out_point = duration if duration > 0 else None
         self._update_time_labels(0, duration)
         self._update_io_label()
+        self._sync_time_fields()
         self.btn_play.configure(text="Play")
-        # First paint on the UI thread (safe for CTk / Tk photo images)
         try:
             self._session.seek(0.0)
         except Exception as exc:  # noqa: BLE001
@@ -643,10 +728,57 @@ class ClipworkApp(_CTkBase):
     def _on_session_status(self, msg: str) -> None:
         self.after(0, lambda m=msg: self._set_status(m))
 
+    def _draw_overlays(self, fitted: Image.Image) -> Image.Image:
+        """Crop rectangle and/or logo ghost on the letterboxed stage."""
+        from PIL import ImageDraw
+
+        img = fitted.copy()
+        d = ImageDraw.Draw(img, "RGBA")
+        w, h = img.size
+        if self._crop_mode:
+            l, t, r, b = self._crop_rect
+            x0, y0, x1, y1 = int(l * w), int(t * h), int(r * w), int(b * h)
+            # dim outside
+            d.rectangle([0, 0, w, y0], fill=(0, 0, 0, 120))
+            d.rectangle([0, y1, w, h], fill=(0, 0, 0, 120))
+            d.rectangle([0, y0, x0, y1], fill=(0, 0, 0, 120))
+            d.rectangle([x1, y0, w, y1], fill=(0, 0, 0, 120))
+            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94, 255), width=2)
+            # corner handles
+            for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+                d.rectangle([cx - 4, cy - 4, cx + 4, cy + 4], fill=(34, 197, 94, 255))
+        if self._logo_ghost and self._logo_path and self._logo_path.is_file():
+            try:
+                logo = Image.open(self._logo_path).convert("RGBA")
+                sc = float(self.var_logo_scale.get() or 0.15)
+                lw = max(8, int(w * sc))
+                lh = max(8, int(logo.height * (lw / max(1, logo.width))))
+                logo = logo.resize((lw, lh), Image.Resampling.LANCZOS)
+                # fade
+                alpha = logo.split()[-1].point(lambda p: int(p * 0.7))
+                logo.putalpha(alpha)
+                pos = (self.var_logo_pos.get() or "top-right").lower()
+                if pos == "top-left":
+                    xy = (12, 12)
+                elif pos == "bottom-left":
+                    xy = (12, h - lh - 12)
+                elif pos == "bottom-right":
+                    xy = (w - lw - 12, h - lh - 12)
+                elif pos == "center":
+                    xy = ((w - lw) // 2, (h - lh) // 2)
+                else:
+                    xy = (w - lw - 12, 12)
+                img.paste(logo, xy, logo)
+            except Exception:
+                pass
+        return img.convert("RGB")
+
     def _show_frame(self, img: Image.Image, t: float) -> None:
         """Paint preview on the main thread only (letterboxed stage)."""
         try:
             fitted = _fit_image(img, (PREVIEW_W, PREVIEW_H))
+            if self._crop_mode or self._logo_ghost:
+                fitted = self._draw_overlays(fitted)
             w, h = PREVIEW_W, PREVIEW_H
             try:
                 light = fitted
@@ -660,7 +792,6 @@ class ClipworkApp(_CTkBase):
                 return
             except Exception as ctk_exc:
                 try:
-                    import tkinter as tk
                     from PIL import ImageTk
 
                     if self._tk_preview is None:
@@ -687,7 +818,7 @@ class ClipworkApp(_CTkBase):
             return
         self._updating_scrub = True
         try:
-            self.scrub.set(t)
+            self.timeline.set_position(t)
         finally:
             self._updating_scrub = False
         dur = self._session.duration
@@ -695,33 +826,97 @@ class ClipworkApp(_CTkBase):
         if self._session.playing:
             self.btn_play.configure(text="Pause")
 
-    def _on_scrub(self, value: float) -> None:
-        if self._updating_scrub:
-            return
-        t = float(value)
+    def _on_timeline_change(self, in_t: float, out_t: float, pos: float) -> None:
+        self._session.in_point = in_t
+        self._session.out_point = out_t
+        self._session.position = pos
+        self._update_io_label()
+        self._sync_time_fields()
+
+    def _on_timeline_seek(self, t: float) -> None:
+        self._scrub_dragging = True
         self._session.stop()
         self.btn_play.configure(text="Play")
         self._session.seek(t)
         self._update_time_labels(t, self._session.duration)
-
-    def _on_scrub_release(self, _event=None) -> None:  # type: ignore[no-untyped-def]
         self._scrub_dragging = False
-        self._session.seek(float(self.scrub.get()))
 
     def _update_time_labels(self, pos: float, dur: float) -> None:
         self.time_label.configure(text=f"{format_time(pos)} / {format_time(dur)}")
 
     def _update_io_label(self) -> None:
         inn = format_time(self._session.in_point)
-        out = (
-            format_time(self._session.out_point)
-            if self._session.out_point is not None
-            else "end"
-        )
-        self.io_label.configure(text=f"In {inn} → Out {out}")
+        out = format_time(self._session.out_or_end)
+        dur = max(0.0, (self._session.out_or_end or 0) - self._session.in_point)
+        self.io_label.configure(text=f"In {inn} → Out {out}  ({format_time(dur)})")
         self.range_label.configure(
-            text=f"Export region: {inn} → {out}  (duration {format_time(max(0, (self._session.out_or_end or 0) - self._session.in_point))})"
+            text=f"Selection {inn} → {out}  ·  Space play · I/O marks · ←/→ frame · drag handles"
         )
+        if not self._updating_scrub:
+            self.timeline.set_range(
+                self._session.in_point,
+                self._session.out_or_end or self._session.duration,
+                self._session.position,
+            )
+
+    def _sync_time_fields(self) -> None:
+        self._updating_time_fields = True
+        try:
+            self.entry_in.delete(0, "end")
+            self.entry_in.insert(0, format_time(self._session.in_point))
+            self.entry_out.delete(0, "end")
+            self.entry_out.insert(0, format_time(self._session.out_or_end))
+            dur = max(0.0, self._session.out_or_end - self._session.in_point)
+            self.entry_dur.delete(0, "end")
+            self.entry_dur.insert(0, format_time(dur))
+        finally:
+            self._updating_time_fields = False
+
+    def _parse_timecode(self, text: str) -> float | None:
+        text = (text or "").strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            if ":" in text:
+                parts = text.split(":")
+                if len(parts) == 2:
+                    m, s = parts
+                    return max(0.0, int(m) * 60 + float(s))
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return max(0.0, int(h) * 3600 + int(m) * 60 + float(s))
+            return max(0.0, float(text))
+        except ValueError:
+            return None
+
+    def _apply_time_fields(self) -> None:
+        inn = self._parse_timecode(self.entry_in.get())
+        out = self._parse_timecode(self.entry_out.get())
+        if inn is None or out is None:
+            messagebox.showwarning(__app_name__, "Enter times as mm:ss.xx or seconds.")
+            return
+        if out <= inn:
+            messagebox.showwarning(__app_name__, "Out must be after In.")
+            return
+        dur = self._session.duration or out
+        self._session.in_point = min(inn, dur)
+        self._session.out_point = min(out, dur)
+        self.timeline.set_range(self._session.in_point, self._session.out_or_end, self._session.position)
+        self._update_io_label()
+        self._sync_time_fields()
+        self._session.seek(self._session.in_point)
+
+    def _apply_duration_field(self) -> None:
+        inn = self._parse_timecode(self.entry_in.get())
+        dur = self._parse_timecode(self.entry_dur.get())
+        if inn is None or dur is None or dur <= 0:
+            messagebox.showwarning(__app_name__, "Enter valid In and duration.")
+            return
+        self._session.in_point = inn
+        self._session.out_point = min(self._session.duration or (inn + dur), inn + dur)
+        self.timeline.set_range(self._session.in_point, self._session.out_or_end, self._session.position)
+        self._update_io_label()
+        self._sync_time_fields()
 
     def _toggle_play(self) -> None:
         if not self._session.info:
@@ -733,24 +928,50 @@ class ClipworkApp(_CTkBase):
             self._session.play()
             self.btn_play.configure(text="Pause")
 
+    def _play_selection(self) -> None:
+        if not self._session.info:
+            return
+        self._session.play_selection(loop=True)
+        self.btn_play.configure(text="Pause")
+        self._set_status("Playing selection (loop) — Stop to end")
+
+    def _frame_step(self, delta: int) -> None:
+        if not self._session.info:
+            return
+        t = self._session.frame_step(delta)
+        self.timeline.set_position(t)
+        self._update_time_labels(t, self._session.duration)
+        self.btn_play.configure(text="Play")
+
     def _stop(self) -> None:
         self._session.stop()
         self.btn_play.configure(text="Play")
         self._session.seek(self._session.in_point)
+        self.timeline.set_position(self._session.position)
 
     def _mark_in(self) -> None:
         self._session.set_in()
+        self.timeline.set_range(
+            self._session.in_point, self._session.out_or_end, self._session.position
+        )
         self._update_io_label()
+        self._sync_time_fields()
         self._log(f"In → {format_time(self._session.in_point)}")
 
     def _mark_out(self) -> None:
         self._session.set_out()
+        self.timeline.set_range(
+            self._session.in_point, self._session.out_or_end, self._session.position
+        )
         self._update_io_label()
+        self._sync_time_fields()
         self._log(f"Out → {format_time(self._session.out_or_end)}")
 
     def _clear_io(self) -> None:
         self._session.clear_in_out()
+        self.timeline.set_range(0.0, self._session.duration or 1.0, self._session.position)
         self._update_io_label()
+        self._sync_time_fields()
         self._log("In/Out cleared")
 
     def _goto_mark(self, which: str) -> None:
@@ -758,6 +979,140 @@ class ClipworkApp(_CTkBase):
             self._session.seek(self._session.in_point)
         else:
             self._session.seek(self._session.out_or_end or 0)
+        self.timeline.set_position(self._session.position)
+
+    def _zoom(self, factor: float) -> None:
+        self.timeline.zoom(factor, center=self._session.position)
+
+    def _zoom_fit(self) -> None:
+        self.timeline.zoom_fit()
+
+    def _zoom_sel(self) -> None:
+        self.timeline.zoom_selection()
+
+    def _bind_keys(self) -> None:
+        self.bind("<space>", lambda _e: self._toggle_play())
+        self.bind("<Key-i>", lambda _e: self._mark_in())
+        self.bind("<Key-I>", lambda _e: self._mark_in())
+        self.bind("<Key-o>", lambda _e: self._mark_out())
+        self.bind("<Key-O>", lambda _e: self._mark_out())
+        self.bind("<Left>", lambda _e: self._frame_step(-1))
+        self.bind("<Right>", lambda _e: self._frame_step(1))
+        self.bind("<Escape>", lambda _e: self._cancel_export())
+        self.focus_set()
+
+    def _on_volume_slider(self, value: float) -> None:
+        self.var_volume.set(f"{float(value):.2f}")
+        if hasattr(self, "volume_label"):
+            self.volume_label.configure(text=f"{int(float(value) * 100)}%")
+
+    def _toggle_crop_mode(self) -> None:
+        self._crop_mode = not self._crop_mode
+        self._logo_ghost = False
+        self._set_status(
+            "Crop overlay ON — drag corners/edges on preview"
+            if self._crop_mode
+            else "Crop overlay off"
+        )
+        if self._session.info:
+            self._session.seek(self._session.position)
+
+    def _toggle_logo_ghost(self) -> None:
+        self._logo_ghost = not self._logo_ghost
+        self._crop_mode = False
+        self._set_status("Logo ghost ON" if self._logo_ghost else "Logo ghost off")
+        if self._session.info:
+            self._session.seek(self._session.position)
+
+    def _crop_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if not self._crop_mode:
+            return
+        w = max(1, self.preview_label.winfo_width())
+        h = max(1, self.preview_label.winfo_height())
+        nx, ny = event.x / w, event.y / h
+        l, t, r, b = self._crop_rect
+        hit = 0.04
+        # Corner hits
+        corners = {
+            "tl": (l, t),
+            "tr": (r, t),
+            "bl": (l, b),
+            "br": (r, b),
+        }
+        for name, (cx, cy) in corners.items():
+            if abs(nx - cx) < hit and abs(ny - cy) < hit:
+                self._crop_drag = name
+                return
+        # Inside = move
+        if l <= nx <= r and t <= ny <= b:
+            self._crop_drag = "move"
+            self._crop_move_origin = (nx, ny, l, t, r, b)
+        else:
+            # New rect from point
+            self._crop_drag = "new"
+            self._crop_rect = (nx, ny, nx + 0.05, ny + 0.05)
+
+    def _crop_motion(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if not self._crop_mode or not self._crop_drag:
+            return
+        w = max(1, self.preview_label.winfo_width())
+        h = max(1, self.preview_label.winfo_height())
+        nx = max(0.0, min(1.0, event.x / w))
+        ny = max(0.0, min(1.0, event.y / h))
+        l, t, r, b = self._crop_rect
+        d = self._crop_drag
+        if d == "tl":
+            l, t = min(nx, r - 0.05), min(ny, b - 0.05)
+        elif d == "tr":
+            r, t = max(nx, l + 0.05), min(ny, b - 0.05)
+        elif d == "bl":
+            l, b = min(nx, r - 0.05), max(ny, t + 0.05)
+        elif d == "br":
+            r, b = max(nx, l + 0.05), max(ny, t + 0.05)
+        elif d == "move" and hasattr(self, "_crop_move_origin"):
+            ox, oy, ol, ot, or_, ob = self._crop_move_origin
+            dx, dy = nx - ox, ny - oy
+            span_x, span_y = or_ - ol, ob - ot
+            l = max(0.0, min(1.0 - span_x, ol + dx))
+            t = max(0.0, min(1.0 - span_y, ot + dy))
+            r, b = l + span_x, t + span_y
+        elif d == "new":
+            r, b = max(nx, l + 0.05), max(ny, t + 0.05)
+        self._crop_rect = (l, t, r, b)
+        if self._session.info:
+            # lightweight repaint: use last frame path by seek current (ok for drag)
+            self._session.seek(self._session.position)
+
+    def _crop_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        self._crop_drag = None
+
+    def _cancel_export(self) -> None:
+        request_cancel()
+        self._set_status("Cancelling export…")
+        self._log("Cancel requested")
+
+    def _open_last_folder(self) -> None:
+        path = self._last_export_path
+        if not path:
+            return
+        folder = path if path.is_dir() else path.parent
+        try:
+            if sys.platform == "win32":
+                import os
+
+                os.startfile(folder)  # type: ignore[attr-defined]
+            else:
+                import subprocess as sp
+
+                sp.Popen(["xdg-open", str(folder)])
+        except Exception as exc:
+            messagebox.showerror(__app_name__, f"Could not open folder:\n{exc}")
+
+    def _set_queue_text(self, text: str) -> None:
+        self.queue_box.configure(state="normal")
+        self.queue_box.delete("1.0", "end")
+        self.queue_box.insert("1.0", text)
+        self.queue_box.configure(state="disabled")
 
     # ── export ──────────────────────────────────────────────
     def _current_path(self) -> Path | None:
@@ -986,11 +1341,15 @@ class ClipworkApp(_CTkBase):
                 return
 
         self._busy = True
+        self._export_proc_active = True
+        self.btn_cancel.configure(state="normal")
+        self.btn_open_folder.configure(state="disabled")
         self._session.stop()
         self.btn_play.configure(text="Play")
         label = dest.name if dest else "…"
         self._set_status(f"Exporting to {label}…")
         self._set_progress(0.02, "Starting…")
+        self._set_queue_text("Export running…\n")
 
         def work() -> None:
             try:
@@ -998,9 +1357,11 @@ class ClipworkApp(_CTkBase):
                     lines = self._export_batch(tool, list(self._files), dest)  # type: ignore[arg-type]
                 else:
                     lines = self._export_worker(tool, src, dest)  # type: ignore[arg-type]
-                self.after(0, lambda: self._export_done(True, lines))
+                self.after(0, lambda: self._export_done(True, lines, dest if not batch else dest))
+            except CancelledError:
+                self.after(0, lambda: self._export_done(False, ["Cancelled by user"], None))
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._export_done(False, [str(exc)]))
+                self.after(0, lambda: self._export_done(False, [str(exc)], None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1162,11 +1523,17 @@ class ClipworkApp(_CTkBase):
         op_name, tag, run_one = self._batch_runner_for_tool(tool)
         total = len(files)
 
+        queue_lines: list[str] = [f"Batch → {out_dir}", ""]
+
         def on_prog(i: int, n: int, name: str) -> None:
             self.after(
                 0,
-                lambda: self._set_progress(
-                    i / max(n, 1), f"Batch {i}/{n}: {name}"
+                lambda: self._set_progress(i / max(n, 1), f"Batch {i}/{n}: {name}"),
+            )
+            self.after(
+                0,
+                lambda: self._set_queue_text(
+                    "\n".join(queue_lines + [f"… {i}/{n} {name}"])
                 ),
             )
 
@@ -1184,9 +1551,12 @@ class ClipworkApp(_CTkBase):
             if r["ok"]:
                 ok_n += 1
                 lines.append(str(r["dest"]))
+                queue_lines.append(f"✓ {Path(r['src']).name} → {Path(str(r['dest'])).name}")
             else:
                 lines.append(f"FAIL {Path(r['src']).name}: {r['error']}")
+                queue_lines.append(f"✗ {Path(r['src']).name}: {r['error']}")
         lines.insert(0, f"Batch done: {ok_n}/{total} ok → {out_dir}")
+        self.after(0, lambda: self._set_queue_text("\n".join(queue_lines)))
         if ok_n == 0:
             raise RuntimeError("All batch jobs failed")
         return lines
@@ -1325,6 +1695,24 @@ class ClipworkApp(_CTkBase):
         if tool == "Edit":
             act = self.var_edit_action.get()
             if act == "crop":
+                # Prefer visual crop rect if overlay was used; else margin field
+                if self._crop_mode or self._crop_rect != (0.1, 0.1, 0.9, 0.9):
+                    info = ops.probe(src)
+                    vw = vh = 0
+                    for s in info.get("streams") or []:
+                        if s.get("codec_type") == "video":
+                            vw = int(s.get("width") or 0)
+                            vh = int(s.get("height") or 0)
+                            break
+                    l, t, r, b = self._crop_rect
+                    x = int(l * vw)
+                    y = int(t * vh)
+                    w = max(2, int((r - l) * vw))
+                    h = max(2, int((b - t) * vh))
+                    return go(
+                        "crop",
+                        lambda: ops.crop_video(src, dest, x=x, y=y, width=w, height=h),
+                    )
                 return go(
                     "crop",
                     lambda: ops.crop_video(
@@ -1487,11 +1875,28 @@ class ClipworkApp(_CTkBase):
             return go("flip_video", lambda: ops.flip_video(src, dest, horizontal=True))
         raise RuntimeError(f"Unknown action: {more}")
 
-    def _export_done(self, ok: bool, lines: list[str]) -> None:
+    def _export_done(
+        self, ok: bool, lines: list[str], dest: Path | None = None
+    ) -> None:
         self._busy = False
-        self._set_status("Done" if ok else "Export failed")
+        self._export_proc_active = False
+        self.btn_cancel.configure(state="disabled")
         if ok:
             self._set_progress(1.0, "Done")
+            self._set_status("Done")
+            # Prefer concrete dest path for Open folder
+            path: Path | None = dest
+            for line in lines:
+                p = Path(line)
+                if p.exists():
+                    path = p
+                    break
+            self._last_export_path = path
+            if path:
+                self.btn_open_folder.configure(state="normal")
+        else:
+            self._set_status("Export failed" if lines and "Cancel" not in lines[0] else "Cancelled")
+            self._set_progress(0, "Cancelled" if lines and "Cancel" in lines[0] else "Failed")
         for line in lines:
             self._log(("OK " if ok else "ERR ") + line)
         if ok and lines:
@@ -1510,9 +1915,9 @@ class ClipworkApp(_CTkBase):
             win,
             text=(
                 f"{__app_name__} is an offline media editor.\n\n"
-                "• Preview video frames, audio waveforms, and images\n"
-                "• Scrub the timeline and set In/Out for trims\n"
-                "• Watch export progress as work runs\n"
+                "• Preview with sound; drag green/red timeline handles to select\n"
+                "• Space play · I/O marks · arrows frame-step · Play sel. loops range\n"
+                "• Export Save As or batch folder · Cancel anytime · Open folder\n"
                 "• Nothing is uploaded\n"
             ),
             justify="left",
