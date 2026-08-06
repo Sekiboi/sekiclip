@@ -1171,17 +1171,25 @@ class ClipworkApp(_CTkBase):
         fade_alpha = 0
         if not outside and (vfi > 0 or vfo > 0):
             if vfi > 0 and t_rel < vfi:
+                # t=0 → black; t=vfi → clear
                 fade_alpha = int(255 * (1.0 - max(0.0, min(1.0, t_rel / max(vfi, 1e-6)))))
             if vfo > 0 and t_rel > sel_dur - vfo:
                 into = t_rel - (sel_dur - vfo)
                 fade_alpha = max(
                     fade_alpha, int(255 * max(0.0, min(1.0, into / max(vfo, 1e-6))))
                 )
+        # Must alpha-composite — Draw() with alpha overwrites RGB to pure black
         if fade_alpha > 0:
-            d.rectangle([0, 0, w, h], fill=(0, 0, 0, fade_alpha))
+            img = Image.alpha_composite(
+                img, Image.new("RGBA", (w, h), (0, 0, 0, fade_alpha))
+            )
+            d = ImageDraw.Draw(img, "RGBA")
 
         if outside and self._session.info and self._session.duration > 0:
-            d.rectangle([0, 0, w, h], fill=(0, 0, 0, 150))
+            img = Image.alpha_composite(
+                img, Image.new("RGBA", (w, h), (0, 0, 0, 150))
+            )
+            d = ImageDraw.Draw(img, "RGBA")
 
         badges: list[str] = []
         try:
