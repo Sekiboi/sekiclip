@@ -416,13 +416,16 @@ def render_cut(
             v_parts.append(f"subtitles='{sub}'")
     vfi = max(0.0, float(video_fade_in))
     vfo = max(0.0, float(video_fade_out))
+    # Cap each fade so in+out never exceed ~98% of the cut (still audible ramps)
+    max_each = max(0.05, out_dur * 0.49)
     if vfi > 0:
-        v_parts.append(f"fade=t=in:st=0:d={min(vfi, out_dur * 0.49)}")
+        v_parts.append(f"fade=t=in:st=0:d={min(vfi, max_each):.4f}")
     if vfo > 0:
-        d = min(vfo, out_dur * 0.49)
-        v_parts.append(f"fade=t=out:st={max(0.0, out_dur - d)}:d={d}")
+        d = min(vfo, max_each)
+        v_parts.append(f"fade=t=out:st={max(0.0, out_dur - d):.4f}:d={d:.4f}")
 
     # --- audio filters ---
+    # Order: trim → reset timestamps → tempo/volume → afade (afade times are on output clock)
     a_parts: list[str] = [
         f"atrim=start={start}:end={end}",
         "asetpts=PTS-STARTPTS",
@@ -444,11 +447,17 @@ def render_cut(
         a_parts.append(f"atempo={remaining:.6f}")
     afi = max(0.0, float(audio_fade_in))
     afo = max(0.0, float(audio_fade_out))
+    # exp curve is easier to hear than the default linear ramp
     if afi > 0:
-        a_parts.append(f"afade=t=in:st=0:d={min(afi, out_dur * 0.49)}")
+        d = min(afi, max_each)
+        a_parts.append(f"afade=t=in:st=0:d={d:.4f}:curve=exp")
     if afo > 0:
-        d = min(afo, out_dur * 0.49)
-        a_parts.append(f"afade=t=out:st={max(0.0, out_dur - d)}:d={d}")
+        d = min(afo, max_each)
+        st = max(0.0, out_dur - d)
+        a_parts.append(f"afade=t=out:st={st:.4f}:d={d:.4f}:curve=exp")
+    # Keep audio as long as the video cut (avoids hard stop if stream is slightly short)
+    if has_audio and out_dur > 0:
+        a_parts.append(f"apad=whole_dur={out_dur:.4f}")
 
     logo_path = Path(logo) if logo else None
     use_logo = bool(has_video and logo_path and logo_path.is_file())

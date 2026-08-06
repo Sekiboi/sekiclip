@@ -1049,7 +1049,7 @@ class ClipworkApp(_CTkBase):
         self._log("Reset edit looks to defaults.")
 
     def _sync_preview_audio(self) -> None:
-        """Preview play uses the same mute/volume as export."""
+        """Preview play uses the same mute/volume/audio fades as export."""
         try:
             mute = bool(self.var_mute.get())
             vol = float(self.var_volume.get() or 1.0)
@@ -1057,6 +1057,10 @@ class ClipworkApp(_CTkBase):
             mute, vol = False, 1.0
         self._session.preview_mute = mute
         self._session.preview_volume = max(0.0, min(4.0, vol))
+        # Audio fades (seconds) — applied by ffplay during Play / Play sel.
+        _vfi, _vfo, afi, afo = self._fade_seconds()
+        self._session.preview_audio_fade_in = afi
+        self._session.preview_audio_fade_out = afo
 
     def _bind_preview_traces(self) -> None:
         """Any look change updates the preview immediately (WYSIWYG)."""
@@ -1545,6 +1549,12 @@ class ClipworkApp(_CTkBase):
             self._sync_preview_audio()
             self._session.play()
             self.btn_play.configure(text="Pause")
+            afi = self._session.preview_audio_fade_in
+            afo = self._session.preview_audio_fade_out
+            if afi > 0 or afo > 0:
+                self._set_status(
+                    f"Playing with audio fade in {afi:g}s / out {afo:g}s"
+                )
 
     def _play_selection(self) -> None:
         if not self._session.info:
@@ -1552,7 +1562,12 @@ class ClipworkApp(_CTkBase):
         self._sync_preview_audio()
         self._session.play_selection(loop=True)
         self.btn_play.configure(text="Pause")
-        self._set_status("Playing selection (loop) — Stop to end")
+        afi = self._session.preview_audio_fade_in
+        afo = self._session.preview_audio_fade_out
+        extra = ""
+        if afi > 0 or afo > 0:
+            extra = f" · audio fade in {afi:g}s / out {afo:g}s"
+        self._set_status("Playing selection (loop) — Stop to end" + extra)
 
     def _frame_step(self, delta: int) -> None:
         if not self._session.info:

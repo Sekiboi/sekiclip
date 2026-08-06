@@ -166,9 +166,11 @@ class MediaSession:
         self.on_frame: Callable[[Image.Image | None, float], None] | None = None
         self.on_position: Callable[[float], None] | None = None
         self.on_status: Callable[[str], None] | None = None
-        # Live preview audio (matches Edit mute/volume when set by the GUI)
+        # Live preview audio (matches Edit mute/volume/fades when set by the GUI)
         self.preview_volume: float = 1.0
         self.preview_mute: bool = False
+        self.preview_audio_fade_in: float = 0.0
+        self.preview_audio_fade_out: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -513,6 +515,45 @@ class MediaSession:
             except Exception:
                 pass
 
+    def _preview_af_filters(self, start_seconds: float, end_seconds: float | None) -> str | None:
+        """Build ffplay -af chain: volume + afade matching export (relative to play window)."""
+        start = max(0.0, float(start_seconds))
+        if end_seconds is not None and end_seconds > start:
+            play_dur = float(end_seconds) - start
+        else:
+            play_dur = max(0.05, self.duration - start) if self.duration > 0 else 0.0
+        if play_dur <= 0:
+            play_dur = 0.05
+
+        parts: list[str] = []
+        vol = 0.0 if self.preview_mute else max(0.0, min(4.0, float(self.preview_volume)))
+        if abs(vol - 1.0) > 1e-3 or self.preview_mute:
+            parts.append(f"volume={vol:.4f}")
+
+        # Fades relative to In/Out when this play window covers those edges
+        inn = float(self.in_point)
+        outp = float(self.out_or_end) if self.out_or_end > 0 else (start + play_dur)
+        sel_dur = max(0.05, outp - inn)
+        afi = max(0.0, float(self.preview_audio_fade_in))
+        afo = max(0.0, float(self.preview_audio_fade_out))
+
+        # Timeline after -ss starts at 0 for the played segment
+        if afi > 0 and start <= inn + 0.05:
+            d = min(afi, sel_dur * 0.49, play_dur * 0.49)
+            st = max(0.0, inn - start)  # usually 0 when playing from In
+            if d > 0.01:
+                parts.append(f"afade=t=in:st={st:.4f}:d={d:.4f}:curve=exp")
+
+        if afo > 0 and (end_seconds is None or end_seconds >= outp - 0.05):
+            d = min(afo, sel_dur * 0.49, play_dur * 0.49)
+            # Source time of fade start → offset within this play segment
+            fade_src = outp - d
+            st = fade_src - start
+            if d > 0.01 and st < play_dur - 0.01:
+                parts.append(f"afade=t=out:st={max(0.0, st):.4f}:d={d:.4f}:curve=exp")
+
+        return ",".join(parts) if parts else None
+
     def _start_audio(self, start_seconds: float, end_seconds: float | None = None) -> bool:
         """Play audio with ffplay (no video window). Instant — no temp decode."""
         if not self.path:
@@ -534,10 +575,10 @@ class MediaSession:
         if end_seconds is not None and end_seconds > start_seconds:
             cmd.extend(["-t", f"{(end_seconds - start_seconds):.3f}"])
         cmd.extend(["-i", str(self.path), "-vn"])
-        # Match Edit mute / volume in the preview (what you hear ≈ export)
-        vol = 0.0 if self.preview_mute else max(0.0, min(4.0, float(self.preview_volume)))
-        if abs(vol - 1.0) > 1e-3:
-            cmd.extend(["-af", f"volume={vol:.4f}"])
+        # Match Edit mute / volume / audio fades (what you hear ≈ export)
+        af = self._preview_af_filters(start_seconds, end_seconds)
+        if af:
+            cmd.extend(["-af", af])
         try:
             # DETACHED / no console window on Windows
             creation = 0
