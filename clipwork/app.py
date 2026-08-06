@@ -405,17 +405,27 @@ class ClipworkApp(_CTkBase):
         self.var_image_action = ctk.StringVar(value="compress")
         self.var_more = ctk.StringVar(value="remux")
         # Edit tab
-        self.var_edit_action = ctk.StringVar(value="crop")
+        self.var_edit_action = ctk.StringVar(value="render_cut")
         self.var_crop_margin = ctk.StringVar(value="40")
         self.var_volume = ctk.StringVar(value="1.0")
         self.var_mute = ctk.BooleanVar(value=False)
-        self.var_speed = ctk.StringVar(value="1.5")
+        self.var_speed = ctk.StringVar(value="1.0")
         self.var_gif_fmt = ctk.StringVar(value="gif")
         self.var_fade_in = ctk.StringVar(value="0.5")
         self.var_fade_out = ctk.StringVar(value="0.5")
+        self.var_v_fade_in = ctk.StringVar(value="0.5")
+        self.var_v_fade_out = ctk.StringVar(value="0.5")
+        self.var_a_fade_in = ctk.StringVar(value="0.5")
+        self.var_a_fade_out = ctk.StringVar(value="0.5")
+        self.var_fade_video = ctk.BooleanVar(value=True)
+        self.var_fade_audio = ctk.BooleanVar(value=True)
+        self.var_use_crop = ctk.BooleanVar(value=False)
+        self.var_use_logo = ctk.BooleanVar(value=False)
+        self.var_use_subs = ctk.BooleanVar(value=False)
         self.var_max_mb = ctk.StringVar(value="25")
         self.var_logo_pos = ctk.StringVar(value="top-right")
         self.var_logo_scale = ctk.StringVar(value="0.15")
+        self.var_cut_quality = ctk.StringVar(value="high")  # high / balanced / fast
         self._srt_path: Path | None = None
         self._logo_path: Path | None = None
 
@@ -465,25 +475,52 @@ class ClipworkApp(_CTkBase):
         )
 
         fr = self._panels["Edit"]
+        ctk.CTkLabel(
+            fr,
+            text="Render cut = full edit in one pass\n(timeline In/Out + fades + options)",
+            wraplength=260,
+            justify="left",
+            text_color=("gray30", "gray70"),
+        ).pack(anchor="w", pady=(0, 4))
         ctk.CTkLabel(fr, text="Action").pack(anchor="w")
         ctk.CTkOptionMenu(
             fr,
             variable=self.var_edit_action,
             values=[
+                "render_cut",
+                "fade",
                 "crop",
                 "volume",
                 "speed",
                 "gif",
-                "fade",
                 "flip",
                 "target_size",
                 "burn_subs",
                 "logo",
             ],
         ).pack(fill="x", pady=4)
-        ctk.CTkLabel(fr, text="Crop margin (px)").pack(anchor="w")
-        ctk.CTkEntry(fr, textvariable=self.var_crop_margin).pack(fill="x", pady=2)
-        ctk.CTkLabel(fr, text="Volume").pack(anchor="w")
+        ctk.CTkLabel(fr, text="Cut quality").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr, variable=self.var_cut_quality, values=["high", "balanced", "fast"]
+        ).pack(fill="x", pady=2)
+
+        ctk.CTkLabel(fr, text="— Fades (seconds) —").pack(anchor="w", pady=(6, 2))
+        ctk.CTkCheckBox(fr, text="Video fade", variable=self.var_fade_video).pack(anchor="w")
+        row_vf = ctk.CTkFrame(fr, fg_color="transparent")
+        row_vf.pack(fill="x")
+        ctk.CTkLabel(row_vf, text="In").pack(side="left")
+        ctk.CTkEntry(row_vf, width=50, textvariable=self.var_v_fade_in).pack(side="left", padx=2)
+        ctk.CTkLabel(row_vf, text="Out").pack(side="left")
+        ctk.CTkEntry(row_vf, width=50, textvariable=self.var_v_fade_out).pack(side="left", padx=2)
+        ctk.CTkCheckBox(fr, text="Audio fade", variable=self.var_fade_audio).pack(anchor="w")
+        row_af = ctk.CTkFrame(fr, fg_color="transparent")
+        row_af.pack(fill="x")
+        ctk.CTkLabel(row_af, text="In").pack(side="left")
+        ctk.CTkEntry(row_af, width=50, textvariable=self.var_a_fade_in).pack(side="left", padx=2)
+        ctk.CTkLabel(row_af, text="Out").pack(side="left")
+        ctk.CTkEntry(row_af, width=50, textvariable=self.var_a_fade_out).pack(side="left", padx=2)
+
+        ctk.CTkLabel(fr, text="— Volume / speed —").pack(anchor="w", pady=(6, 2))
         self.volume_slider = ctk.CTkSlider(
             fr, from_=0, to=2.0, number_of_steps=40, command=self._on_volume_slider
         )
@@ -492,27 +529,25 @@ class ClipworkApp(_CTkBase):
         self.volume_label = ctk.CTkLabel(fr, text="100%")
         self.volume_label.pack(anchor="w")
         ctk.CTkCheckBox(fr, text="Mute", variable=self.var_mute).pack(anchor="w", pady=2)
-        ctk.CTkButton(fr, text="Toggle crop overlay", command=self._toggle_crop_mode).pack(
-            fill="x", pady=2
-        )
-        ctk.CTkButton(fr, text="Toggle logo ghost", command=self._toggle_logo_ghost).pack(
-            fill="x", pady=2
-        )
-        ctk.CTkLabel(fr, text="Speed").pack(anchor="w")
         ctk.CTkOptionMenu(
             fr, variable=self.var_speed, values=list(ops.SPEED_PRESETS)
         ).pack(fill="x", pady=2)
-        ctk.CTkLabel(fr, text="GIF format / fade in-out (s) / max MB").pack(anchor="w")
-        ctk.CTkOptionMenu(fr, variable=self.var_gif_fmt, values=["gif", "webp"]).pack(
+
+        ctk.CTkLabel(fr, text="— Optional on render cut —").pack(anchor="w", pady=(6, 2))
+        ctk.CTkCheckBox(fr, text="Apply crop overlay", variable=self.var_use_crop).pack(anchor="w")
+        ctk.CTkButton(fr, text="Toggle crop overlay", command=self._toggle_crop_mode).pack(
             fill="x", pady=2
         )
-        ctk.CTkEntry(fr, textvariable=self.var_fade_in).pack(fill="x", pady=2)
-        ctk.CTkEntry(fr, textvariable=self.var_fade_out).pack(fill="x", pady=2)
-        ctk.CTkEntry(fr, textvariable=self.var_max_mb).pack(fill="x", pady=2)
+        ctk.CTkEntry(fr, textvariable=self.var_crop_margin).pack(fill="x", pady=2)
+        ctk.CTkCheckBox(fr, text="Burn subtitles", variable=self.var_use_subs).pack(anchor="w")
         ctk.CTkButton(fr, text="Choose subtitle .srt…", command=self._pick_srt).pack(
             fill="x", pady=2
         )
+        ctk.CTkCheckBox(fr, text="Logo overlay", variable=self.var_use_logo).pack(anchor="w")
         ctk.CTkButton(fr, text="Choose logo image…", command=self._pick_logo).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkButton(fr, text="Toggle logo ghost", command=self._toggle_logo_ghost).pack(
             fill="x", pady=2
         )
         ctk.CTkOptionMenu(
@@ -521,6 +556,14 @@ class ClipworkApp(_CTkBase):
             values=["top-right", "top-left", "bottom-right", "bottom-left", "center"],
         ).pack(fill="x", pady=2)
         ctk.CTkEntry(fr, textvariable=self.var_logo_scale).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="GIF format / max MB (other actions)").pack(anchor="w")
+        ctk.CTkOptionMenu(fr, variable=self.var_gif_fmt, values=["gif", "webp"]).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkEntry(fr, textvariable=self.var_max_mb).pack(fill="x", pady=2)
+        # keep shared fade fields in sync helpers
+        self.var_fade_in = self.var_v_fade_in
+        self.var_fade_out = self.var_v_fade_out
         self.edit_files_label = ctk.CTkLabel(
             fr, text="No .srt / logo chosen", text_color=("gray40", "gray60"), wraplength=250
         )
@@ -1022,6 +1065,56 @@ class ClipworkApp(_CTkBase):
         if hasattr(self, "volume_label"):
             self.volume_label.configure(text=f"{int(float(value) * 100)}%")
 
+    def _cut_quality_params(self) -> tuple[int, str]:
+        """Map UI quality label → (crf, x264 preset). High quality + efficient defaults."""
+        q = (self.var_cut_quality.get() or "high").lower()
+        if q == "fast":
+            return 23, "veryfast"
+        if q == "balanced":
+            return 20, "medium"
+        return 18, "medium"  # high
+
+    def _fade_seconds(self) -> tuple[float, float, float, float]:
+        """Return video_in, video_out, audio_in, audio_out (0 when checkbox off)."""
+        vfi = float(self.var_v_fade_in.get() or 0) if self.var_fade_video.get() else 0.0
+        vfo = float(self.var_v_fade_out.get() or 0) if self.var_fade_video.get() else 0.0
+        afi = float(self.var_a_fade_in.get() or 0) if self.var_fade_audio.get() else 0.0
+        afo = float(self.var_a_fade_out.get() or 0) if self.var_fade_audio.get() else 0.0
+        return max(0.0, vfi), max(0.0, vfo), max(0.0, afi), max(0.0, afo)
+
+    def _crop_pixels(self, src: Path) -> tuple[int, int, int | None, int | None]:
+        """Crop x,y,w,h from overlay (or margin). Returns (0,0,None,None) if unused."""
+        if not self.var_use_crop.get() and not self._crop_mode:
+            return 0, 0, None, None
+        info = ops.probe(src)
+        vw = vh = 0
+        for s in info.get("streams") or []:
+            if s.get("codec_type") == "video":
+                vw = int(s.get("width") or 0)
+                vh = int(s.get("height") or 0)
+                break
+        if vw < 2 or vh < 2:
+            return 0, 0, None, None
+        # Prefer visual overlay when enabled or non-default
+        if self._crop_mode or self._crop_rect != (0.1, 0.1, 0.9, 0.9) or self.var_use_crop.get():
+            l, t, r, b = self._crop_rect
+            x = max(0, int(l * vw))
+            y = max(0, int(t * vh))
+            w = max(2, int((r - l) * vw))
+            h = max(2, int((b - t) * vh))
+            w -= w % 2
+            h -= h % 2
+            return x, y, w, h
+        margin = int(self.var_crop_margin.get() or 0)
+        if margin > 0:
+            m = margin
+            w = max(2, vw - 2 * m)
+            h = max(2, vh - 2 * m)
+            w -= w % 2
+            h -= h % 2
+            return m, m, w, h
+        return 0, 0, None, None
+
     def _toggle_crop_mode(self) -> None:
         self._crop_mode = not self._crop_mode
         self._logo_ghost = False
@@ -1257,6 +1350,8 @@ class ClipworkApp(_CTkBase):
                 ]
             if act == "target_size":
                 return initial_dir, f"{stem}_sized.mp4", video_ft
+            if act == "render_cut":
+                return initial_dir, f"{stem}_cut.mp4", video_ft
             if act in ("crop", "speed", "fade", "flip", "volume", "burn_subs", "logo"):
                 tag = act
                 return initial_dir, f"{stem}_{tag}{src.suffix or '.mp4'}", video_ft + audio_ft
@@ -1510,14 +1605,45 @@ class ClipworkApp(_CTkBase):
         vol = float(self.var_volume.get() or 1.0)
         mute = bool(self.var_mute.get())
         speed = float(self.var_speed.get() or 1.0)
-        fi = float(self.var_fade_in.get() or 0.5)
-        fo = float(self.var_fade_out.get() or 0.5)
+        vfi, vfo, afi, afo = self._fade_seconds()
         max_mb = float(self.var_max_mb.get() or 25)
         start = self._session.in_point
         end = self._session.out_or_end
         gif_fmt = self.var_gif_fmt.get() or "gif"
+        crf, preset = self._cut_quality_params()
+        use_logo = bool(self.var_use_logo.get() and self._logo_path)
+        use_subs = bool(self.var_use_subs.get() and self._srt_path)
+        logo_path = self._logo_path
+        srt_path = self._srt_path
+        logo_pos = self.var_logo_pos.get() or "top-right"
+        logo_scale = float(self.var_logo_scale.get() or 0.15)
 
         def run(src: Path, dest: Path) -> Path:
+            if act == "render_cut":
+                cx, cy, cw, ch = self._crop_pixels(src)
+                return ops.render_cut(
+                    src,
+                    dest,
+                    start=start,
+                    end=end if end else None,
+                    crop_x=cx,
+                    crop_y=cy,
+                    crop_w=cw,
+                    crop_h=ch,
+                    speed=speed,
+                    volume=vol,
+                    mute=mute,
+                    video_fade_in=vfi,
+                    video_fade_out=vfo,
+                    audio_fade_in=afi,
+                    audio_fade_out=afo,
+                    logo=logo_path if use_logo else None,
+                    logo_position=logo_pos,
+                    logo_scale=logo_scale,
+                    srt=srt_path if use_subs else None,
+                    crf=crf,
+                    preset=preset,
+                )
             if act == "crop":
                 return ops.crop_video(src, dest, margin=margin)
             if act == "volume":
@@ -1529,7 +1655,20 @@ class ClipworkApp(_CTkBase):
                     src, dest, start=start, end=end if end else None, fmt=gif_fmt
                 )
             if act == "fade":
-                return ops.fade_media(src, dest, fade_in=fi, fade_out=fo)
+                return ops.fade_media(
+                    src,
+                    dest,
+                    fade_in=0.0,
+                    fade_out=0.0,
+                    video_fade_in=vfi,
+                    video_fade_out=vfo,
+                    audio_fade_in=afi,
+                    audio_fade_out=afo,
+                    start=start,
+                    end=end if end else None,
+                    crf=crf,
+                    preset=preset,
+                )
             if act == "flip":
                 return ops.flip_video(src, dest, horizontal=True)
             if act == "target_size":
@@ -1545,8 +1684,8 @@ class ClipworkApp(_CTkBase):
                     src,
                     self._logo_path,
                     dest,
-                    position=self.var_logo_pos.get() or "top-right",
-                    scale=float(self.var_logo_scale.get() or 0.15),
+                    position=logo_pos,
+                    scale=logo_scale,
                 )
             raise RuntimeError(f"Unknown edit action: {act}")
 
@@ -1784,6 +1923,95 @@ class ClipworkApp(_CTkBase):
 
         if tool == "Edit":
             act = self.var_edit_action.get()
+            if act in ("render_cut", "fade"):
+                start = self._session.in_point
+                end = self._session.out_or_end
+                vfi, vfo, afi, afo = self._fade_seconds()
+                crf, preset = self._cut_quality_params()
+                vol = float(self.var_volume.get() or 1.0)
+                mute = bool(self.var_mute.get())
+                speed = float(self.var_speed.get() or 1.0)
+                cx, cy, cw, ch = (0, 0, None, None)
+                logo = None
+                srt = None
+                if act == "render_cut":
+                    if self.var_use_crop.get() or self._crop_mode:
+                        cx, cy, cw, ch = self._crop_pixels(src)
+                    if self.var_use_logo.get() and self._logo_path:
+                        logo = self._logo_path
+                    if self.var_use_subs.get() and self._srt_path:
+                        srt = self._srt_path
+                sel = f"{format_time(start)} → {format_time(end or 0)}"
+                note(f"  One-pass {'render cut' if act == 'render_cut' else 'fade'}: {sel}")
+                note(
+                    f"  Fades video {vfi:.2f}/{vfo:.2f}s · audio {afi:.2f}/{afo:.2f}s"
+                    f" · quality={self.var_cut_quality.get() or 'high'}"
+                )
+                if act == "render_cut":
+                    bits = []
+                    if cw and ch:
+                        bits.append(f"crop {cw}x{ch}")
+                    if abs(speed - 1.0) > 1e-3:
+                        bits.append(f"speed {speed}x")
+                    if mute:
+                        bits.append("mute")
+                    elif abs(vol - 1.0) > 1e-3:
+                        bits.append(f"vol {vol:.2f}")
+                    if logo:
+                        bits.append("logo")
+                    if srt:
+                        bits.append("subs")
+                    if bits:
+                        note(f"  Options: {', '.join(bits)}")
+                prog(0.03, f"{act}: encoding…")
+                try:
+                    if act == "render_cut":
+                        out = ops.render_cut(
+                            src,
+                            dest,
+                            start=start,
+                            end=end if end else None,
+                            crop_x=cx,
+                            crop_y=cy,
+                            crop_w=cw,
+                            crop_h=ch,
+                            speed=speed,
+                            volume=vol,
+                            mute=mute,
+                            video_fade_in=vfi,
+                            video_fade_out=vfo,
+                            audio_fade_in=afi,
+                            audio_fade_out=afo,
+                            logo=logo,
+                            logo_position=self.var_logo_pos.get() or "top-right",
+                            logo_scale=float(self.var_logo_scale.get() or 0.15),
+                            srt=srt,
+                            crf=crf,
+                            preset=preset,
+                            on_progress=prog,
+                        )
+                    else:
+                        out = ops.fade_media(
+                            src,
+                            dest,
+                            fade_in=0.0,
+                            fade_out=0.0,
+                            video_fade_in=vfi,
+                            video_fade_out=vfo,
+                            audio_fade_in=afi,
+                            audio_fade_out=afo,
+                            start=start,
+                            end=end if end else None,
+                            crf=crf,
+                            preset=preset,
+                            on_progress=prog,
+                        )
+                except CancelledError:
+                    note(f"  {act} cancelled.")
+                    raise
+                note(f"  Writing finished: {Path(out).name}")
+                prog(1.0, "100% · done")
+                return [str(out)]
             if act == "crop":
                 # Prefer visual crop rect if overlay was used; else margin field
                 if self._crop_mode or self._crop_rect != (0.1, 0.1, 0.9, 0.9):
@@ -1835,16 +2063,6 @@ class ClipworkApp(_CTkBase):
                         start=self._session.in_point,
                         end=self._session.out_or_end or None,
                         fmt=self.var_gif_fmt.get() or "gif",
-                    ),
-                )
-            if act == "fade":
-                return go(
-                    "fade",
-                    lambda: ops.fade_media(
-                        src,
-                        dest,
-                        fade_in=float(self.var_fade_in.get() or 0.5),
-                        fade_out=float(self.var_fade_out.get() or 0.5),
                     ),
                 )
             if act == "flip":

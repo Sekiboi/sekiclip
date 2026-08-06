@@ -18,6 +18,7 @@ from clipwork.media_ops.edit import (
     fade_media,
     flip_video,
     logo_overlay,
+    render_cut,
     target_size_video,
 )
 from clipwork.media_ops.ffmpeg_util import (
@@ -89,6 +90,7 @@ __all__ = [
     "normalize_audio",
     "probe",
     "remux",
+    "render_cut",
     "request_cancel",
     "resize_image",
     "rotate_image",

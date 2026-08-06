@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Callable
 
 from clipwork.media_ops.ffmpeg_util import (
     default_output,
@@ -304,60 +305,217 @@ def fade_media(
     *,
     fade_in: float = 0.5,
     fade_out: float = 0.5,
+    video_fade_in: float | None = None,
+    video_fade_out: float | None = None,
+    audio_fade_in: float | None = None,
+    audio_fade_out: float | None = None,
+    start: float = 0.0,
+    end: float | None = None,
+    crf: int = 20,
+    preset: str = "medium",
+    on_progress: Callable[[float, str], None] | None = None,
 ) -> Path:
-    """Short fade in/out on video and/or audio."""
+    """Fade in/out for video and/or audio (independently).
+
+    If start/end given, cuts to that range first (one encode).
+    video_*/audio_* override the shared fade_in/fade_out when set.
+    """
     src = Path(src)
-    out = _out(src, dest, src.suffix or ".mp4", "fade")
+    out = _out(src, dest, ".mp4", "fade")
     out.parent.mkdir(parents=True, exist_ok=True)
-    fi = max(0.0, float(fade_in))
-    fo = max(0.0, float(fade_out))
+
+    vfi = max(0.0, float(video_fade_in if video_fade_in is not None else fade_in))
+    vfo = max(0.0, float(video_fade_out if video_fade_out is not None else fade_out))
+    afi = max(0.0, float(audio_fade_in if audio_fade_in is not None else fade_in))
+    afo = max(0.0, float(audio_fade_out if audio_fade_out is not None else fade_out))
+
+    # Delegate to one-pass renderer for consistency
+    return render_cut(
+        src,
+        out,
+        start=start,
+        end=end,
+        video_fade_in=vfi,
+        video_fade_out=vfo,
+        audio_fade_in=afi,
+        audio_fade_out=afo,
+        crf=crf,
+        preset=preset,
+        on_progress=on_progress,
+    )
+
+
+def render_cut(
+    src: Path | str,
+    dest: Path | str | None = None,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
+    crop_x: int = 0,
+    crop_y: int = 0,
+    crop_w: int | None = None,
+    crop_h: int | None = None,
+    flip_h: bool = False,
+    flip_v: bool = False,
+    speed: float = 1.0,
+    volume: float = 1.0,
+    mute: bool = False,
+    video_fade_in: float = 0.0,
+    video_fade_out: float = 0.0,
+    audio_fade_in: float = 0.0,
+    audio_fade_out: float = 0.0,
+    logo: Path | str | None = None,
+    logo_position: str = "top-right",
+    logo_scale: float = 0.15,
+    logo_opacity: float = 0.9,
+    srt: Path | str | None = None,
+    crf: int = 20,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+    scale: str | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> Path:
+    """One-pass edit: cut + video/audio fades + optional effects (single encode)."""
+    src = Path(src)
+    out = _out(src, dest, ".mp4", "cut")
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     data = probe(src)
-    duration = float((data.get("format") or {}).get("duration") or 0)
-    if duration <= 0:
-        raise RuntimeError("Could not read duration for fade")
-
+    full_dur = float((data.get("format") or {}).get("duration") or 0)
     has_video = any(s.get("codec_type") == "video" for s in data.get("streams") or [])
     has_audio = any(s.get("codec_type") == "audio" for s in data.get("streams") or [])
+    if not has_video and not has_audio:
+        raise RuntimeError("No video or audio streams found")
 
-    filters: list[str] = []
+    start = max(0.0, float(start))
+    if end is None or end <= start:
+        end = full_dur if full_dur > start else start + 0.1
+    end = min(float(end), full_dur) if full_dur > 0 else float(end)
+    sel_dur = max(0.05, end - start)
+    sp = max(0.25, min(4.0, float(speed)))
+    out_dur = sel_dur / sp
+
+    # --- video filters (trim inside filter for multi-input safety) ---
+    v_parts: list[str] = [
+        f"trim=start={start}:end={end}",
+        "setpts=PTS-STARTPTS",
+    ]
+    if crop_w is not None and crop_h is not None:
+        w = int(crop_w) - int(crop_w) % 2
+        h = int(crop_h) - int(crop_h) % 2
+        if w >= 2 and h >= 2:
+            v_parts.append(f"crop={w}:{h}:{int(crop_x)}:{int(crop_y)}")
+    if flip_h:
+        v_parts.append("hflip")
+    if flip_v:
+        v_parts.append("vflip")
+    if abs(sp - 1.0) > 1e-3:
+        v_parts.append(f"setpts=PTS/{sp}")
+    if scale:
+        v_parts.append(f"scale={scale}")
+    if srt and has_video:
+        srt_p = Path(srt)
+        if srt_p.is_file():
+            sub = str(srt_p.resolve()).replace("\\", "/").replace(":", "\\:")
+            v_parts.append(f"subtitles='{sub}'")
+    vfi = max(0.0, float(video_fade_in))
+    vfo = max(0.0, float(video_fade_out))
+    if vfi > 0:
+        v_parts.append(f"fade=t=in:st=0:d={min(vfi, out_dur * 0.49)}")
+    if vfo > 0:
+        d = min(vfo, out_dur * 0.49)
+        v_parts.append(f"fade=t=out:st={max(0.0, out_dur - d)}:d={d}")
+
+    # --- audio filters ---
+    a_parts: list[str] = [
+        f"atrim=start={start}:end={end}",
+        "asetpts=PTS-STARTPTS",
+    ]
+    if mute:
+        a_parts.append("volume=0")
+    else:
+        vol = max(0.0, float(volume))
+        if abs(vol - 1.0) > 1e-3:
+            a_parts.append(f"volume={vol}")
+    if abs(sp - 1.0) > 1e-3:
+        remaining = sp
+        while remaining > 2.0 + 1e-6:
+            a_parts.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5 - 1e-6:
+            a_parts.append("atempo=0.5")
+            remaining /= 0.5
+        a_parts.append(f"atempo={remaining:.6f}")
+    afi = max(0.0, float(audio_fade_in))
+    afo = max(0.0, float(audio_fade_out))
+    if afi > 0:
+        a_parts.append(f"afade=t=in:st=0:d={min(afi, out_dur * 0.49)}")
+    if afo > 0:
+        d = min(afo, out_dur * 0.49)
+        a_parts.append(f"afade=t=out:st={max(0.0, out_dur - d)}:d={d}")
+
+    logo_path = Path(logo) if logo else None
+    use_logo = bool(has_video and logo_path and logo_path.is_file())
+
+    fc_bits: list[str] = []
     maps: list[str] = []
-    if has_video:
-        # fade out starts at duration - fo
-        st_out = max(0.0, duration - fo) if fo > 0 else duration
-        parts = []
-        if fi > 0:
-            parts.append(f"fade=t=in:st=0:d={fi}")
-        if fo > 0:
-            parts.append(f"fade=t=out:st={st_out}:d={fo}")
-        if parts:
-            filters.append(f"[0:v]{','.join(parts)}[v]")
-            maps.extend(["-map", "[v]"])
-        else:
-            maps.extend(["-map", "0:v"])
-    if has_audio:
-        st_out = max(0.0, duration - fo) if fo > 0 else duration
-        parts = []
-        if fi > 0:
-            parts.append(f"afade=t=in:st=0:d={fi}")
-        if fo > 0:
-            parts.append(f"afade=t=out:st={st_out}:d={fo}")
-        if parts:
-            filters.append(f"[0:a]{','.join(parts)}[a]")
-            maps.extend(["-map", "[a]"])
-        else:
-            maps.extend(["-map", "0:a"])
 
-    args = ["-i", str(src)]
-    if filters:
-        args.extend(["-filter_complex", ";".join(filters)])
+    if has_video:
+        if use_logo:
+            sc = max(0.05, min(0.5, float(logo_scale)))
+            op = max(0.1, min(1.0, float(logo_opacity)))
+            pos = logo_position.lower().replace("_", "-")
+            if pos in ("top-left", "tl"):
+                xy = "10:10"
+            elif pos in ("bottom-left", "bl"):
+                xy = "10:H-h-10"
+            elif pos in ("bottom-right", "br"):
+                xy = "W-w-10:H-h-10"
+            elif pos in ("center", "c"):
+                xy = "(W-w)/2:(H-h)/2"
+            else:
+                xy = "W-w-10:10"
+            fc_bits.append(f"[0:v]{','.join(v_parts)}[vbase]")
+            fc_bits.append(
+                f"[1:v]scale=iw*{sc}:-1,format=rgba,colorchannelmixer=aa={op}[lg]"
+            )
+            fc_bits.append(f"[vbase][lg]overlay={xy}[vout]")
+            maps.extend(["-map", "[vout]"])
+        else:
+            fc_bits.append(f"[0:v]{','.join(v_parts)}[vout]")
+            maps.extend(["-map", "[vout]"])
+
+    if has_audio:
+        fc_bits.append(f"[0:a]{','.join(a_parts)}[aout]")
+        maps.extend(["-map", "[aout]"])
+
+    args: list[str] = ["-i", str(src)]
+    if use_logo:
+        args.extend(["-i", str(logo_path)])
+    args.extend(["-filter_complex", ";".join(fc_bits)])
     args.extend(maps)
     if has_video:
-        args.extend(["-c:v", "libx264", "-crf", "23"])
+        args.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                str(preset),
+                "-crf",
+                str(int(crf)),
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        )
     if has_audio:
-        args.extend(["-c:a", "aac", "-b:a", "128k"])
-    args.extend(["-movflags", "+faststart", str(out)])
-    run_ffmpeg(args)
+        args.extend(["-c:a", "aac", "-b:a", str(audio_bitrate)])
+    args.extend(["-movflags", "+faststart", "-t", f"{out_dur:.4f}", str(out)])
+
+    run_ffmpeg(
+        args,
+        on_progress=on_progress,
+        duration_hint=out_dur if on_progress else None,
+    )
     return out
 
 

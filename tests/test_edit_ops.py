@@ -69,6 +69,60 @@ def test_p1_fade_flip_target(tmp_path: Path) -> None:
     assert sized.is_file()
 
 
+def test_dual_fade_independent(tmp_path: Path) -> None:
+    """Video and audio fades can differ; zero video fade still fades audio."""
+    vid = _make_video(tmp_path / "v.mp4", 2.0)
+    out = ops.fade_media(
+        vid,
+        tmp_path / "dual.mp4",
+        fade_in=0.0,
+        fade_out=0.0,
+        video_fade_in=0.0,
+        video_fade_out=0.3,
+        audio_fade_in=0.4,
+        audio_fade_out=0.1,
+        start=0.1,
+        end=1.6,
+        crf=28,
+        preset="ultrafast",
+    )
+    assert out.is_file() and out.stat().st_size > 0
+    info = ops.probe(out)
+    dur = float((info.get("format") or {}).get("duration") or 0)
+    assert 1.2 < dur < 1.8
+
+
+def test_render_cut_one_pass(tmp_path: Path) -> None:
+    """Full one-pass edit: cut + dual fades + volume + speed."""
+    vid = _make_video(tmp_path / "v.mp4", 2.0)
+    progress: list[float] = []
+
+    def on_prog(frac: float, _label: str) -> None:
+        progress.append(frac)
+
+    out = ops.render_cut(
+        vid,
+        tmp_path / "cut.mp4",
+        start=0.2,
+        end=1.5,
+        video_fade_in=0.15,
+        video_fade_out=0.15,
+        audio_fade_in=0.2,
+        audio_fade_out=0.1,
+        volume=0.8,
+        speed=1.0,
+        crf=28,
+        preset="ultrafast",
+        on_progress=on_prog,
+    )
+    assert out.is_file() and out.stat().st_size > 0
+    info = ops.probe(out)
+    dur = float((info.get("format") or {}).get("duration") or 0)
+    assert 1.0 < dur < 1.6
+    # progress may be empty if ffmpeg is very fast, but callback must be accepted
+    assert isinstance(progress, list)
+
+
 def test_p2_logo(tmp_path: Path) -> None:
     vid = _make_video(tmp_path / "v.mp4", 0.8)
     logo = tmp_path / "logo.png"

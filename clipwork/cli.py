@@ -212,7 +212,49 @@ def cmd_gif(args: argparse.Namespace) -> int:
 def cmd_fade(args: argparse.Namespace) -> int:
     print(
         ops.fade_media(
-            args.input, _out(args), fade_in=args.fade_in, fade_out=args.fade_out
+            args.input,
+            _out(args),
+            fade_in=args.fade_in,
+            fade_out=args.fade_out,
+            video_fade_in=args.video_fade_in,
+            video_fade_out=args.video_fade_out,
+            audio_fade_in=args.audio_fade_in,
+            audio_fade_out=args.audio_fade_out,
+            start=float(args.start or 0),
+            end=float(args.end) if args.end is not None else None,
+        )
+    )
+    return 0
+
+
+def cmd_render_cut(args: argparse.Namespace) -> int:
+    print(
+        ops.render_cut(
+            args.input,
+            _out(args),
+            start=float(args.start or 0),
+            end=float(args.end) if args.end is not None else None,
+            crop_x=int(args.crop_x or 0),
+            crop_y=int(args.crop_y or 0),
+            crop_w=int(args.crop_w) if args.crop_w else None,
+            crop_h=int(args.crop_h) if args.crop_h else None,
+            flip_h=bool(args.flip_h),
+            flip_v=bool(args.flip_v),
+            speed=float(args.speed or 1.0),
+            volume=float(args.volume or 1.0),
+            mute=bool(args.mute),
+            video_fade_in=float(args.video_fade_in or 0),
+            video_fade_out=float(args.video_fade_out or 0),
+            audio_fade_in=float(args.audio_fade_in or 0),
+            audio_fade_out=float(args.audio_fade_out or 0),
+            logo=args.logo,
+            logo_position=args.logo_position or "top-right",
+            logo_scale=float(args.logo_scale or 0.15),
+            logo_opacity=float(args.logo_opacity or 0.9),
+            srt=args.srt,
+            crf=int(args.crf or 18),
+            preset=args.preset or "medium",
+            audio_bitrate=args.audio_bitrate or "192k",
         )
     )
     return 0
@@ -389,12 +431,49 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-f", "--format", default="gif", choices=("gif", "webp"))
     s.set_defaults(func=cmd_gif)
 
-    s = sub.add_parser("fade", help="Fade in/out")
+    s = sub.add_parser("fade", help="Fade in/out (video and/or audio, optional cut)")
     s.add_argument("input")
     s.add_argument("-o", "--output")
-    s.add_argument("--fade-in", type=float, default=0.5)
-    s.add_argument("--fade-out", type=float, default=0.5)
+    s.add_argument("--fade-in", type=float, default=0.5, help="Default for both A/V")
+    s.add_argument("--fade-out", type=float, default=0.5, help="Default for both A/V")
+    s.add_argument("--video-fade-in", type=float, default=None)
+    s.add_argument("--video-fade-out", type=float, default=None)
+    s.add_argument("--audio-fade-in", type=float, default=None)
+    s.add_argument("--audio-fade-out", type=float, default=None)
+    s.add_argument("--start", default="0")
+    s.add_argument("--end", default=None)
     s.set_defaults(func=cmd_fade)
+
+    s = sub.add_parser(
+        "render-cut",
+        help="One-pass full edit: cut + dual fades + volume/speed/crop/logo/subs",
+    )
+    s.add_argument("input")
+    s.add_argument("-o", "--output")
+    s.add_argument("--start", default="0")
+    s.add_argument("--end", default=None)
+    s.add_argument("--crop-x", type=int, default=0)
+    s.add_argument("--crop-y", type=int, default=0)
+    s.add_argument("--crop-w", type=int, default=None)
+    s.add_argument("--crop-h", type=int, default=None)
+    s.add_argument("--flip-h", action="store_true")
+    s.add_argument("--flip-v", action="store_true")
+    s.add_argument("--speed", type=float, default=1.0)
+    s.add_argument("--volume", type=float, default=1.0)
+    s.add_argument("--mute", action="store_true")
+    s.add_argument("--video-fade-in", type=float, default=0.0)
+    s.add_argument("--video-fade-out", type=float, default=0.0)
+    s.add_argument("--audio-fade-in", type=float, default=0.0)
+    s.add_argument("--audio-fade-out", type=float, default=0.0)
+    s.add_argument("--logo", default=None)
+    s.add_argument("--logo-position", default="top-right")
+    s.add_argument("--logo-scale", type=float, default=0.15)
+    s.add_argument("--logo-opacity", type=float, default=0.9)
+    s.add_argument("--srt", default=None)
+    s.add_argument("--crf", type=int, default=18)
+    s.add_argument("--preset", default="medium")
+    s.add_argument("--audio-bitrate", default="192k")
+    s.set_defaults(func=cmd_render_cut)
 
     s = sub.add_parser("flip", help="Flip video or image")
     s.add_argument("input")
