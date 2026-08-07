@@ -29,16 +29,19 @@ InfoAfterFile=..\scripts\installer_info_after.txt
 OutputDir=..\dist
 OutputBaseFilename=Sekiclip-{#MyAppVersion}-Setup
 SetupIconFile=..\assets\sekiclip.ico
-; Welcome-page side art + small corner logo on other pages
+; Left panel (164:314 aspect) + small top icon — drawn in make_icon.py
 WizardImageFile=..\assets\wizard_image.bmp
 WizardSmallImageFile=..\assets\wizard_small.bmp
-WizardImageStretch=no
+; Keep aspect so play mark is not elongated (stretching was the wizard bug)
+WizardImageStretch=yes
+WizardImageBackColor=$2F6FA8
+WizardSmallImageBackColor=$2F6FA8
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-WizardSizePercent=120
+WizardSizePercent=120,120
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
