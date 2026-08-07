@@ -2,13 +2,22 @@
 
 Offline media editor for **Windows**. Preview, set In/Out, export.
 
-**Beta** · **Free forever** · **No uploads** · [MIT](LICENSE)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Offline](https://img.shields.io/badge/privacy-100%25%20offline-brightgreen)
+![Beta](https://img.shields.io/badge/status-public%20beta-orange)
+
+<p align="center">
+  <img src="assets/sekiclip.png" width="96" height="96" alt="Sekiclip">
+</p>
+
+**Public beta** `0.1.0-beta.1` · Free forever (MIT)
 
 ---
 
 ## Install (Windows)
 
-1. Download **`Sekiclip-…-Setup.exe`**
+1. Download **`Sekiclip-…-Setup.exe`** from the [latest release](https://github.com/Sekiboi/sekiclip/releases/latest)
 2. Run the installer (Next → Install → Finish)
 3. Sekiclip opens — drag a file in
 
