@@ -1,7 +1,7 @@
 """Regenerate assets/sekiclip.png and assets/sekiclip.ico.
 
 Play wedge on rounded square — same plate blue as Sekikit brand.
-Sekikit PLATE: (47, 111, 168).
+Play mark is a compact equilateral-style triangle with generous padding.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
-# Match Sekikit icon plate (scripts/make_icon.py in justpages / Sekikit)
+# Match Sekikit icon plate
 PLATE = (47, 111, 168, 255)
 WHITE = (255, 255, 255, 255)
 
@@ -30,20 +30,19 @@ def draw_icon(size: int, with_plate: bool = True) -> Image.Image:
             fill=PLATE,
         )
 
-    # Compact play triangle (not full-bleed). Slight left optical bias so it
-    # reads centered; height slightly > depth so it isn't stretched sideways.
+    # Compact equilateral play — ~20% of canvas so the plate reads clearly.
+    # Optical center: slight left shift so the triangle mass feels centered.
     ink = WHITE if with_plate else PLATE
     cx = s * 0.5
     cy = s * 0.5
-    # Shift geometry left so the mass of the triangle feels centered
-    ox = cx - s * 0.03
-    half_h = s * 0.155  # vertical half-edge
-    depth = s * 0.26  # base → tip (shorter than height → not elongated)
-    tri = [
-        (ox - depth * 0.35, cy - half_h),
-        (ox - depth * 0.35, cy + half_h),
-        (ox + depth * 0.65, cy),
-    ]
+    side = s * 0.22  # vertical base length
+    height = side * 0.86602540378  # equilateral tip distance
+    ox = cx - height * 0.10
+    x0 = ox - height * 0.28
+    x1 = ox + height * 0.72
+    y0 = cy - side * 0.5
+    y1 = cy + side * 0.5
+    tri = [(x0, y0), (x0, y1), (x1, cy)]
     d.polygon(tri, fill=ink)
     return img
 
@@ -52,8 +51,15 @@ def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     draw_icon(512, True).save(ASSETS / "sekiclip.png")
     draw_icon(512, False).save(ASSETS / "sekiclip_mark.png")
-    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    draw_icon(256, True).save(ASSETS / "sekiclip.ico", format="ICO", sizes=sizes)
+
+    # Proper multi-resolution ICO (Windows taskbar / installer)
+    ico_frames = [draw_icon(s, True) for s in (16, 24, 32, 48, 64, 128, 256)]
+    ico_frames[0].save(
+        ASSETS / "sekiclip.ico",
+        format="ICO",
+        sizes=[(im.width, im.height) for im in ico_frames],
+        append_images=ico_frames[1:],
+    )
     print(f"Wrote {ASSETS / 'sekiclip.png'}")
     print(f"Wrote {ASSETS / 'sekiclip_mark.png'}")
     print(f"Wrote {ASSETS / 'sekiclip.ico'}")
