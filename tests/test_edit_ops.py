@@ -1,4 +1,4 @@
-"""Tests for P0–P2 edit ops (ffmpeg required)."""
+"""Tests for edit ops (ffmpeg required)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from clipwork import media_ops as ops
+from sekiclip import media_ops as ops
 
 has_ffmpeg = bool(ops.find_ffmpeg())
 pytestmark = pytest.mark.skipif(not has_ffmpeg, reason="ffmpeg required")

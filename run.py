@@ -1,4 +1,4 @@
-"""Launch Clipwork from the project root: python run.py"""
+"""Launch Sekiclip from the project root: python run.py"""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from pathlib import Path
 
 def _crash_log_path() -> Path:
     try:
-        from clipwork.diagnostics import crash_log_path
+        from sekiclip.core.diagnostics import crash_log_path
 
         return crash_log_path()
     except Exception:
         if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent / "clipwork_crash.log"
-        return Path(__file__).resolve().parent / "clipwork_crash.log"
+            return Path(sys.executable).resolve().parent / "sekiclip_crash.log"
+        return Path(__file__).resolve().parent / "sekiclip_crash.log"
 
 
 def main() -> None:
     try:
-        from clipwork.app import main as app_main
+        from sekiclip.app import main as app_main
 
         app_main()
     except Exception as exc:
@@ -30,7 +30,7 @@ def main() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
         except OSError:
-            path = Path.cwd() / "clipwork_crash.log"
+            path = Path.cwd() / "sekiclip_crash.log"
             path.write_text(text, encoding="utf-8")
         try:
             import tkinter as tk
@@ -38,10 +38,10 @@ def main() -> None:
 
             root = tk.Tk()
             root.withdraw()
-            messagebox.showerror("Clipwork", f"Failed to start:\n{exc}\n\nLog:\n{path}")
+            messagebox.showerror("Sekiclip", f"Failed to start:\n{exc}\n\nLog:\n{path}")
             root.destroy()
         except Exception:
-            print(f"Clipwork failed: {exc}\nLog: {path}", file=sys.stderr)
+            print(f"Sekiclip failed: {exc}\nLog: {path}", file=sys.stderr)
         raise SystemExit(1)
 
 

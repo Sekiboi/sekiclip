@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from clipwork.media_ops import find_ffmpeg
-from clipwork.media_preview import MediaKind, MediaSession, classify, format_time, load_info
+from sekiclip.media_ops import find_ffmpeg
+from sekiclip.preview.session import MediaKind, MediaSession, classify, format_time, load_info
 
 has_ffmpeg = bool(find_ffmpeg())
 

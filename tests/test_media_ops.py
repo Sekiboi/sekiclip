@@ -1,4 +1,4 @@
-"""Tests for Clipwork media ops (needs ffmpeg for A/V)."""
+"""Tests for Sekiclip media ops (needs ffmpeg for A/V)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from clipwork import media_ops as ops
+from sekiclip import media_ops as ops
 
 ffmpeg = ops.find_ffmpeg()
 ffprobe = ops.find_ffprobe()
@@ -142,7 +142,7 @@ def test_concat(tmp_media: Path) -> None:
 
 
 def test_cli_parser() -> None:
-    from clipwork.cli import build_parser
+    from sekiclip.cli import build_parser
 
     p = build_parser()
     ns = p.parse_args(["info", "nope.mp4"])

@@ -1,0 +1,14 @@
+Sekiclip is ready.
+
+Open it from the Start Menu (or the desktop shortcut if you chose one).
+
+Uninstall anytime:
+  Start Menu → Sekiclip → Uninstall Sekiclip
+  or Windows Settings → Apps → Sekiclip
+
+Your settings stay in a separate folder after uninstall
+(%LOCALAPPDATA%\Sekiclip). Delete that folder only if you want a full clean.
+
+If Windows shows “Windows protected your PC” the first time you open Sekiclip:
+  More info → Run anyway
+(This is common for unsigned beta software.)

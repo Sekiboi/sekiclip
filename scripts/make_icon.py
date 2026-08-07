@@ -1,4 +1,8 @@
-"""Generate simple Clipwork icon (play wedge on rounded square)."""
+"""Regenerate assets/sekiclip.png and assets/sekiclip.ico.
+
+Play wedge on rounded square — same plate blue as Sekikit brand.
+Sekikit PLATE: (47, 111, 168).
+"""
 
 from __future__ import annotations
 
@@ -8,37 +12,46 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
-BLUE = (37, 99, 235, 255)
+# Match Sekikit icon plate (scripts/make_icon.py in justpages / Sekikit)
+PLATE = (47, 111, 168, 255)
 WHITE = (255, 255, 255, 255)
+
+
+def draw_icon(size: int, with_plate: bool = True) -> Image.Image:
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    s = float(size)
+
+    if with_plate:
+        pad = max(1, int(s * 0.06))
+        d.rounded_rectangle(
+            [pad, pad, size - pad - 1, size - pad - 1],
+            radius=max(2, int(s * 0.22)),
+            fill=PLATE,
+        )
+
+    # Play triangle (media), white on plate — bare mark uses plate fill on clear
+    m = 0.28 if with_plate else 0.18
+    ink = WHITE if with_plate else PLATE
+    left = m * s
+    right = (1 - m * 0.55) * s
+    top = m * s
+    bot = (1 - m) * s
+    mid_y = (top + bot) / 2
+    tri = [(left, top), (left, bot), (right, mid_y)]
+    d.polygon(tri, fill=ink)
+    return img
 
 
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
-    size = 256
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    margin = 16
-    d.rounded_rectangle(
-        [margin, margin, size - margin, size - margin],
-        radius=48,
-        fill=BLUE,
-    )
-    # Play triangle
-    cx, cy = size // 2, size // 2
-    tri = [(cx - 28, cy - 40), (cx - 28, cy + 40), (cx + 48, cy)]
-    d.polygon(tri, fill=WHITE)
-    png = ASSETS / "clipwork.png"
-    img.save(png)
-    # ICO sizes
-    ico_path = ASSETS / "clipwork.ico"
-    icons = []
-    for s in (16, 32, 48, 64, 128, 256):
-        icons.append(img.resize((s, s), Image.Resampling.LANCZOS))
-    icons[-1].save(ico_path, format="ICO", sizes=[(i.width, i.height) for i in icons])
-    mark = img.resize((64, 64), Image.Resampling.LANCZOS)
-    mark.save(ASSETS / "clipwork_mark.png")
-    print(f"Wrote {png}")
-    print(f"Wrote {ico_path}")
+    draw_icon(512, True).save(ASSETS / "sekiclip.png")
+    draw_icon(512, False).save(ASSETS / "sekiclip_mark.png")
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    draw_icon(256, True).save(ASSETS / "sekiclip.ico", format="ICO", sizes=sizes)
+    print(f"Wrote {ASSETS / 'sekiclip.png'}")
+    print(f"Wrote {ASSETS / 'sekiclip_mark.png'}")
+    print(f"Wrote {ASSETS / 'sekiclip.ico'}")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
-# Clipwork privacy
+# Sekiclip privacy
 
-**Clipwork does not upload your files.**
+**Sekiclip does not upload your files.**
 
-- All processing is local (ffmpeg / Pillow on your machine).
-- Optional diagnostics export defaults **off**.
-- Enabling diagnostics only allows *you* to copy or save a local report.
-- Reports: version, OS summary, ffmpeg found/not, job log basenames — no media content.
+- All processing is local on your PC.
+- Optional diagnostics default **off**.
+- If you enable diagnostics, you can copy a local report yourself — the app never sends it.
+- Reports: app version, OS summary, whether tools were found, job log **file names only** (not full paths or media content).
 
-Installed app data: `%LOCALAPPDATA%\Clipwork`.
+Settings live under `%LOCALAPPDATA%\Sekiclip` (or `.\data` in portable mode).

@@ -1,0 +1,13 @@
+Sekiclip is an offline media editor (beta).
+
+• Free forever — no paid plan, no watermarks
+• Your media stays on this PC (nothing is uploaded)
+• Installs only for your Windows user (no admin password)
+
+This release includes the tools needed for video and audio.
+
+After install:
+  App → under your user profile (Programs\Sekiclip)
+  Settings → kept separately so upgrades don’t wipe them
+
+Preview may look softer than the file you export; final quality is what you save.

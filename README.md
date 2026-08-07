@@ -1,87 +1,38 @@
-# Clipwork
+# Sekiclip
 
-Offline media editor for Windows. Preview video and audio, scrub a timeline, set In/Out, and export — convert, compress, trim, and fix common files on your PC. **No accounts, no uploads, no paid tier.**
+Offline media editor for **Windows**. Preview, set In/Out, export.
 
-Requires **ffmpeg** + **ffplay** on PATH (or under `vendor/`) for video/audio work and preview sound. Preview video uses **OpenCV** (pip).
-
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Offline](https://img.shields.io/badge/privacy-100%25%20offline-brightgreen)
-![Beta](https://img.shields.io/badge/status-local%20beta-orange)
-
-**Local beta** `0.1.0-beta.1` · Free forever (MIT) · Sister project to [Sekikit](https://github.com/Sekiboi/sekikit) (PDF)
+**Beta** · **Free forever** · **No uploads** · [MIT](LICENSE)
 
 ---
 
-## Features
+## Install (Windows)
 
-| Area | Tools |
-|------|--------|
-| **Visual editor** | Preview + sound, **draggable In/Out range timeline**, time fields, play selection, frame step, keyboard shortcuts, crop overlay, logo ghost, zoom, cancel export, open folder, batch queue |
-| **Convert / Compress** | Formats + share presets (chat, Discord, WhatsApp, email, 720p, 1080p, quality, fast_gpu) |
-| **Trim** | From timeline In/Out |
-| **Edit** | Crop, volume/mute, speed, GIF/WebP clip, fade, flip, target size (MB), burn SRT, logo overlay |
-| **Audio / Image / More** | Extract, normalize, mono, remux, strip audio, frame grab, rotate, concat |
-| **Batch** | Same action on all listed files → choose output folder |
-| **CLI** | Full toolkit (`crop`, `volume`, `speed`, `gif`, `fade`, `flip`, `target-size`, `burn-subs`, `logo`, …) |
+1. Download **`Sekiclip-…-Setup.exe`**
+2. Run the installer (Next → Install → Finish)
+3. Sekiclip opens — drag a file in
 
-Single-file (and batch) toolkit — not a multi-track NLE.
+No Python. No admin password. Video tools are included.
 
-See [docs/LIMITS.md](docs/LIMITS.md).
+| On your PC | Where |
+|------------|--------|
+| **App** | `%LOCALAPPDATA%\Programs\Sekiclip` |
+| **Settings** | `%LOCALAPPDATA%\Sekiclip` (kept if you uninstall) |
 
----
+**Uninstall:** Start Menu → Sekiclip → Uninstall, or Settings → Apps → Sekiclip  
 
-## Requirements
+If Windows says **“Windows protected your PC”** (unsigned beta): More info → Run anyway.
 
-- **Windows 10/11** (primary)
-- **Python 3.10+** (for source)
-- **ffmpeg** + **ffprobe** on PATH, or binaries in `vendor/`
+**Portable (optional):** download the portable zip and run `Sekiclip.exe` from the folder.
 
 ---
 
-## Run from source
+## What you can do
 
-```powershell
-cd path\to\clipwork
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pythonw run.py
-```
+- Timeline In/Out · Play → Out · Loop cut  
+- Export quality (resolution + audio kbps)  
+- Fades, crop, volume, speed, GIF, logo, burn SRT  
+- Convert, compress, extract audio, images, batch  
 
-CLI:
-
-```powershell
-$env:PYTHONPATH = "."
-python -m clipwork info video.mp4
-python -m clipwork compress video.mp4 --preset chat
-python -m clipwork trim video.mp4 --start 0 --end 5 --reencode
-python -m clipwork extract-audio video.mp4 -f mp3
-python -m clipwork resize photo.jpg --max-edge 1280
-python -m clipwork --help
-```
-
----
-
-## Privacy
-
-Clipwork does not phone home. Media stays on your machine unless you copy it.
-
-Optional anonymous diagnostics (default **off**) only build a local text report you can copy. See [docs/PRIVACY.md](docs/PRIVACY.md).
-
----
-
-## Develop
-
-```powershell
-pip install -r requirements.txt pytest
-pytest -q
-```
-
-Not on GitHub yet — local project only until the first working beta is solid.
-
----
-
-## License
-
-[MIT](LICENSE) — free for personal and commercial use. **No paid edition.**
+Preview may look softer than export. **Final quality is the exported file.**  
+Not a multi-track NLE — [limits](docs/LIMITS.md) · [privacy](docs/PRIVACY.md)

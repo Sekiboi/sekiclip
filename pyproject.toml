@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "clipwork"
+name = "sekiclip"
 version = "0.1.0b1"
 description = "Offline media toolkit — convert, compress, trim. Free forever, no uploads."
 readme = "README.md"
@@ -22,20 +22,27 @@ dependencies = [
   "Pillow>=10.0.0",
   "tkinterdnd2>=0.3.0",
   "opencv-python-headless>=4.8.0",
+  "numpy>=1.24.0",
+  "sounddevice>=0.4.6",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.scripts]
-clipwork = "clipwork.cli:main"
-clipwork-gui = "clipwork.app:main"
+sekiclip = "sekiclip.cli:main"
+sekiclip-gui = "sekiclip.app:main"
 
 [project.urls]
-Homepage = "https://github.com/Sekiboi/clipwork"
-Repository = "https://github.com/Sekiboi/clipwork"
-Issues = "https://github.com/Sekiboi/clipwork/issues"
+Homepage = "https://github.com/Sekiboi/sekiclip"
+Repository = "https://github.com/Sekiboi/sekiclip"
+Issues = "https://github.com/Sekiboi/sekiclip/issues"
 
 [tool.setuptools.packages.find]
-include = ["clipwork*"]
+include = ["sekiclip*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Avoid writing cache under protected or locked trees when possible
+cache_dir = ".pytest_cache"

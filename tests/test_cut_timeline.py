@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from clipwork.preview_match import (
+from sekiclip.preview.match import (
     CutTimeline,
     build_audio_filter,
     export_fade_filter_pairs,
@@ -49,6 +49,54 @@ def test_audio_filter_exact_one_second() -> None:
     )
     assert "atrim=start=0.0000:end=30.0000" in af
     assert "afade=t=out:st=29.0000:d=1.0000" in af
+
+
+def test_audio_filter_preseeked_no_absolute_atrim() -> None:
+    """Preview fast-seek: no atrim (demux -ss/-t); fades still use cut Out."""
+    cut = CutTimeline(10.0, 40.0, speed=1.0)
+    af = build_audio_filter(
+        start=10.0,
+        end=40.0,
+        cut=cut,
+        audio_fade_in=0.5,
+        audio_fade_out=1.0,
+        input_preseeked=True,
+    )
+    assert "atrim=" not in af
+    assert "asetpts=PTS-STARTPTS" in af
+    assert "afade=t=in:st=0:d=0.5000" in af
+    assert "afade=t=out:st=29.0000:d=1.0000" in af
+
+
+def test_fade_uses_mid_file_in_out() -> None:
+    """Fades belong to the user's In/Out, not file start."""
+    cut = CutTimeline(60.0, 90.0, speed=1.0)  # 30s cut mid-file
+    # Fade-out last 2s of cut → source 88–90
+    assert video_fade_strength_at_source(cut, 87.0, 0.0, 2.0) == 0.0
+    s = video_fade_strength_at_source(cut, 89.0, 0.0, 2.0)
+    assert 0.4 < s < 0.6
+    # Fade-in first 1s → source 60–61
+    assert video_fade_strength_at_source(cut, 60.5, 1.0, 0.0) > 0.4
+    assert video_fade_strength_at_source(cut, 62.0, 1.0, 0.0) == 0.0
+    # Outside cut: no fade strength from helper
+    assert video_fade_strength_at_source(cut, 50.0, 1.0, 2.0) == 0.0
+
+
+def test_ensure_legal_marks_clamps() -> None:
+    from pathlib import Path
+
+    from sekiclip.preview.session import MediaInfo, MediaKind, MediaSession
+
+    s = MediaSession()
+    s.info = MediaInfo(Path("x"), MediaKind.VIDEO, 50.0, 64, 64, True, True, "x", 30.0)
+    s.in_point = -1.0
+    s.out_point = 99.0
+    s.position = 80.0
+    notes = s.ensure_legal_marks()
+    assert s.in_point == 0.0
+    assert s.out_point == 50.0
+    assert s.position == 50.0  # clamped to duration
+    assert notes
 
 
 def test_export_fade_pairs_match_cut_end() -> None:

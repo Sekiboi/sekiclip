@@ -1,21 +1,27 @@
 .venv/
 _tmp/
+.tmp_pytest/
+proxy_cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 build/
 dist/
+Sekiclip.spec
 *.spec
 *.log
-clipwork_jobs.log
-clipwork_crash.log
-clipwork_prefs.json
+sekiclip_jobs.log
+sekiclip_crash.log
+sekiclip_prefs.json
 .vendor_bin/
+# Large binaries (fetch via scripts\fetch_ffmpeg.ps1 for packaging)
 vendor/ffmpeg.exe
 vendor/ffprobe.exe
+vendor/ffplay.exe
 vendor/*.exe
 *.egg-info/
 .mypy_cache/
+_reorg.py
 
 _t.png
 _t.webp

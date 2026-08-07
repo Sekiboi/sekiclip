@@ -1,3 +1,7 @@
-Optional: place ffmpeg.exe and ffprobe.exe in this folder so Clipwork can find them without PATH.
+ffmpeg for Sekiclip (video/audio).
 
-Download builds from https://www.gyan.dev/ffmpeg/builds/ or your package manager.
+Release builds: scripts\package_release.ps1 downloads essentials here automatically
+(scripts\fetch_ffmpeg.ps1) so testers get install-and-play.
+
+Manual: place ffmpeg.exe + ffprobe.exe (optional ffplay.exe) in this folder.
+Source: https://www.gyan.dev/ffmpeg/builds/ (essentials).
