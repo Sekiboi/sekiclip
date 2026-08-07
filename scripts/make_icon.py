@@ -30,15 +30,20 @@ def draw_icon(size: int, with_plate: bool = True) -> Image.Image:
             fill=PLATE,
         )
 
-    # Play triangle (media), white on plate — bare mark uses plate fill on clear
-    m = 0.28 if with_plate else 0.18
+    # Compact play triangle (not full-bleed). Slight left optical bias so it
+    # reads centered; height slightly > depth so it isn't stretched sideways.
     ink = WHITE if with_plate else PLATE
-    left = m * s
-    right = (1 - m * 0.55) * s
-    top = m * s
-    bot = (1 - m) * s
-    mid_y = (top + bot) / 2
-    tri = [(left, top), (left, bot), (right, mid_y)]
+    cx = s * 0.5
+    cy = s * 0.5
+    # Shift geometry left so the mass of the triangle feels centered
+    ox = cx - s * 0.03
+    half_h = s * 0.155  # vertical half-edge
+    depth = s * 0.26  # base → tip (shorter than height → not elongated)
+    tri = [
+        (ox - depth * 0.35, cy - half_h),
+        (ox - depth * 0.35, cy + half_h),
+        (ox + depth * 0.65, cy),
+    ]
     d.polygon(tri, fill=ink)
     return img
 
