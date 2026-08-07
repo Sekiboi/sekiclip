@@ -81,6 +81,7 @@ def build_session_dict(
     """Serializable session (paths as strings)."""
     srt = look.get("srt_path")
     logo = look.get("logo_path")
+    music = look.get("music_path")
     return {
         "version": SESSION_VERSION,
         "media": str(media_path) if media_path else "",
@@ -112,6 +113,22 @@ def build_session_dict(
             "max_mb": str(look.get("max_mb") or "25"),
             "srt_path": str(srt) if srt else "",
             "logo_path": str(logo) if logo else "",
+            "color_look": str(look.get("color_look") or "none"),
+            "color_strength": str(look.get("color_strength") or "1.0"),
+            "vfx": str(look.get("vfx") or "none"),
+            "vfx_strength": str(look.get("vfx_strength") or "1.0"),
+            "title": str(look.get("title") or ""),
+            "title_sub": str(look.get("title_sub") or ""),
+            "title_position": str(look.get("title_position") or "center"),
+            "end_card": str(look.get("end_card") or ""),
+            "end_card_hold": str(look.get("end_card_hold") or "3.0"),
+            "music_path": str(music) if music else "",
+            "music_volume": str(look.get("music_volume") or "0.35"),
+            "music_fade_in": str(look.get("music_fade_in") or "1.0"),
+            "music_fade_out": str(look.get("music_fade_out") or "1.5"),
+            "music_duck": bool(look.get("music_duck")),
+            "transition": str(look.get("transition") or "crossfade"),
+            "transition_dur": str(look.get("transition_dur") or "0.6"),
         },
     }
 

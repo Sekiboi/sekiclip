@@ -452,6 +452,22 @@ class PanelsMixin:
         self.var_max_mb = ctk.StringVar(value="25")
         self.var_logo_pos = ctk.StringVar(value="top-right")
         self.var_logo_scale = ctk.StringVar(value="0.15")
+        # Film-making (color, VFX, titles, music, end card)
+        self.var_color_look = ctk.StringVar(value="none")
+        self.var_color_strength = ctk.StringVar(value="1.0")
+        self.var_vfx = ctk.StringVar(value="none")
+        self.var_vfx_strength = ctk.StringVar(value="1.0")
+        self.var_title = ctk.StringVar(value="")
+        self.var_title_sub = ctk.StringVar(value="")
+        self.var_title_position = ctk.StringVar(value="center")
+        self.var_end_card = ctk.StringVar(value="")
+        self.var_end_card_hold = ctk.StringVar(value="3.0")
+        self.var_music_volume = ctk.StringVar(value="0.35")
+        self.var_music_fade_in = ctk.StringVar(value="1.0")
+        self.var_music_fade_out = ctk.StringVar(value="1.5")
+        self.var_music_duck = ctk.BooleanVar(value=False)
+        self.var_transition = ctk.StringVar(value="crossfade")
+        self.var_transition_dur = ctk.StringVar(value="0.6")
         # Export quality (Edit + Trim re-encodes): familiar 1080p / kbps pickers.
         self.var_video_quality = ctk.StringVar(value=VIDEO_QUALITY_DEFAULT_LABEL)
         self.var_audio_quality = ctk.StringVar(value=AUDIO_QUALITY_DEFAULT_LABEL)
@@ -462,6 +478,7 @@ class PanelsMixin:
         self.var_loud_tp = ctk.StringVar(value="-1.5")
         self._srt_path: Path | None = None
         self._logo_path: Path | None = None
+        self._music_path: Path | None = None
 
         for name in ("Convert", "Compress", "Trim", "Edit", "Audio", "Image", "More"):
             self._panels[name] = ctk.CTkFrame(self.tool_frame, fg_color="transparent")
@@ -638,7 +655,86 @@ class PanelsMixin:
         ).pack(fill="x", pady=2)
         ctk.CTkLabel(fr, text="Logo scale (0–1)").pack(anchor="w")
         ctk.CTkEntry(fr, textvariable=self.var_logo_scale).pack(fill="x", pady=2)
-        ctk.CTkLabel(fr, text="GIF format").pack(anchor="w")
+
+        # Film-making section (export-true; preview may lag until scrub)
+        ctk.CTkLabel(fr, text="— Film look —").pack(anchor="w", pady=(8, 2))
+        ctk.CTkLabel(
+            fr,
+            text="Color, VFX, titles & music bed apply on export.",
+            wraplength=260,
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(fr, text="Color look").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr,
+            variable=self.var_color_look,
+            values=[
+                "none",
+                "warm",
+                "cool",
+                "documentary",
+                "night",
+                "soft_film",
+                "high_contrast",
+                "bw",
+                "sepia",
+            ],
+        ).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Color strength (0–1)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_color_strength).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="VFX").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr,
+            variable=self.var_vfx,
+            values=["none", "vignette", "grain", "soft", "sharpen", "bloom"],
+        ).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="VFX strength (0–1)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_vfx_strength).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Title").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_title).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Subtitle").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_title_sub).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Title position").pack(anchor="w")
+        ctk.CTkOptionMenu(
+            fr,
+            variable=self.var_title_position,
+            values=["center", "lower-third", "top"],
+        ).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="End card text").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_end_card).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="End card hold (sec)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_end_card_hold).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="— Music bed —").pack(anchor="w", pady=(6, 2))
+        ctk.CTkButton(fr, text="Choose music…", command=self._pick_music).pack(
+            fill="x", pady=2
+        )
+        ctk.CTkButton(
+            fr,
+            text="Clear music",
+            height=26,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            command=self._clear_music,
+        ).pack(fill="x", pady=2)
+        ctk.CTkLabel(fr, text="Music volume (0–1)").pack(anchor="w")
+        ctk.CTkEntry(fr, textvariable=self.var_music_volume).pack(fill="x", pady=2)
+        row_mf = ctk.CTkFrame(fr, fg_color="transparent")
+        row_mf.pack(fill="x")
+        ctk.CTkLabel(row_mf, text="In").pack(side="left")
+        ctk.CTkEntry(row_mf, width=50, textvariable=self.var_music_fade_in).pack(
+            side="left", padx=2
+        )
+        ctk.CTkLabel(row_mf, text="Out").pack(side="left")
+        ctk.CTkEntry(row_mf, width=50, textvariable=self.var_music_fade_out).pack(
+            side="left", padx=2
+        )
+        ctk.CTkCheckBox(
+            fr, text="Duck music under dialogue", variable=self.var_music_duck
+        ).pack(anchor="w", pady=2)
+
+        ctk.CTkLabel(fr, text="GIF format").pack(anchor="w", pady=(6, 0))
         ctk.CTkOptionMenu(fr, variable=self.var_gif_fmt, values=["gif", "webp"]).pack(
             fill="x", pady=2
         )
@@ -659,7 +755,7 @@ class PanelsMixin:
         self.var_fade_in = self.var_v_fade_in
         self.var_fade_out = self.var_v_fade_out
         self.edit_files_label = ctk.CTkLabel(
-            fr, text="No .srt / logo", text_color=("gray40", "gray60"), wraplength=250
+            fr, text="No .srt / logo / music", text_color=("gray40", "gray60"), wraplength=250
         )
         self.edit_files_label.pack(anchor="w", pady=4)
 
@@ -760,15 +856,33 @@ class PanelsMixin:
             self._logo_path = Path(p)
             self._update_edit_files_label()
 
+    def _pick_music(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Music / voice bed",
+            filetypes=[
+                ("Audio", "*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg"),
+                ("All", "*.*"),
+            ],
+        )
+        if p:
+            self._music_path = Path(p)
+            self._update_edit_files_label()
+
+    def _clear_music(self) -> None:
+        self._music_path = None
+        self._update_edit_files_label()
+
     def _update_edit_files_label(self) -> None:
         parts = []
         if self._srt_path:
             parts.append(f"SRT: {self._srt_path.name}")
         if self._logo_path:
             parts.append(f"Logo: {self._logo_path.name}")
+        if self._music_path:
+            parts.append(f"Music: {self._music_path.name}")
         if hasattr(self, "edit_files_label"):
             self.edit_files_label.configure(
-                text=" · ".join(parts) if parts else "No .srt / logo chosen"
+                text=" · ".join(parts) if parts else "No .srt / logo / music"
             )
         self._on_edit_setting_changed()
 
@@ -1183,6 +1297,22 @@ class PanelsMixin:
             logo_ghost=bool(self._logo_ghost),
             gif_fmt=str(self.var_gif_fmt.get() or "gif"),
             max_mb=str(self.var_max_mb.get() or "25"),
+            color_look=str(self.var_color_look.get() or "none"),
+            color_strength=str(self.var_color_strength.get() or "1.0"),
+            vfx=str(self.var_vfx.get() or "none"),
+            vfx_strength=str(self.var_vfx_strength.get() or "1.0"),
+            title=str(self.var_title.get() or ""),
+            title_sub=str(self.var_title_sub.get() or ""),
+            title_position=str(self.var_title_position.get() or "center"),
+            end_card=str(self.var_end_card.get() or ""),
+            end_card_hold=str(self.var_end_card_hold.get() or "3.0"),
+            music_path=self._music_path,
+            music_volume=str(self.var_music_volume.get() or "0.35"),
+            music_fade_in=str(self.var_music_fade_in.get() or "1.0"),
+            music_fade_out=str(self.var_music_fade_out.get() or "1.5"),
+            music_duck=bool(self.var_music_duck.get()),
+            transition=str(self.var_transition.get() or "crossfade"),
+            transition_dur=str(self.var_transition_dur.get() or "0.6"),
         )
 
     def _reset_edit_looks(self) -> None:
@@ -1220,6 +1350,22 @@ class PanelsMixin:
             self._logo_ghost = False
             self._srt_path = None
             self._logo_path = None
+            self._music_path = None
+            self.var_color_look.set("none")
+            self.var_color_strength.set("1.0")
+            self.var_vfx.set("none")
+            self.var_vfx_strength.set("1.0")
+            self.var_title.set("")
+            self.var_title_sub.set("")
+            self.var_title_position.set("center")
+            self.var_end_card.set("")
+            self.var_end_card_hold.set("3.0")
+            self.var_music_volume.set("0.35")
+            self.var_music_fade_in.set("1.0")
+            self.var_music_fade_out.set("1.5")
+            self.var_music_duck.set(False)
+            self.var_transition.set("crossfade")
+            self.var_transition_dur.set("0.6")
             self._update_edit_files_label()
         finally:
             self._suppress_preview_trace = False
@@ -1250,6 +1396,21 @@ class PanelsMixin:
             "var_video_quality",
             "var_audio_quality",
             "var_crop_margin",
+            "var_color_look",
+            "var_color_strength",
+            "var_vfx",
+            "var_vfx_strength",
+            "var_title",
+            "var_title_sub",
+            "var_title_position",
+            "var_end_card",
+            "var_end_card_hold",
+            "var_music_volume",
+            "var_music_fade_in",
+            "var_music_fade_out",
+            "var_music_duck",
+            "var_transition",
+            "var_transition_dur",
         ):
             v = getattr(self, name, None)
             if v is not None:

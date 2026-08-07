@@ -35,6 +35,23 @@ class Look:
     logo_ghost: bool = False
     gif_fmt: str = "gif"
     max_mb: str = "25"
+    # Film-making (roadmap)
+    color_look: str = "none"
+    color_strength: str = "1.0"
+    vfx: str = "none"
+    vfx_strength: str = "1.0"
+    title: str = ""
+    title_sub: str = ""
+    title_position: str = "center"
+    end_card: str = ""
+    end_card_hold: str = "3.0"
+    music_path: Path | str | None = None
+    music_volume: str = "0.35"
+    music_fade_in: str = "1.0"
+    music_fade_out: str = "1.5"
+    music_duck: bool = False
+    transition: str = "crossfade"
+    transition_dur: str = "0.6"
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -42,6 +59,8 @@ class Look:
             d["srt_path"] = str(self.srt_path)
         if self.logo_path is not None:
             d["logo_path"] = str(self.logo_path)
+        if self.music_path is not None:
+            d["music_path"] = str(self.music_path)
         d["crop_rect"] = tuple(self.crop_rect)
         return d
 
@@ -56,6 +75,7 @@ class Look:
             crop_rect = (0.1, 0.1, 0.9, 0.9)
         srt = raw.get("srt_path") or None
         logo = raw.get("logo_path") or None
+        music = raw.get("music_path") or None
         return cls(
             edit_action=str(raw.get("edit_action") or "render_cut"),
             video_quality=str(raw.get("video_quality") or "1080p"),
@@ -81,6 +101,22 @@ class Look:
             logo_ghost=bool(raw.get("logo_ghost")),
             gif_fmt=str(raw.get("gif_fmt") or "gif"),
             max_mb=str(raw.get("max_mb") or "25"),
+            color_look=str(raw.get("color_look") or "none"),
+            color_strength=str(raw.get("color_strength") or "1.0"),
+            vfx=str(raw.get("vfx") or "none"),
+            vfx_strength=str(raw.get("vfx_strength") or "1.0"),
+            title=str(raw.get("title") or ""),
+            title_sub=str(raw.get("title_sub") or ""),
+            title_position=str(raw.get("title_position") or "center"),
+            end_card=str(raw.get("end_card") or ""),
+            end_card_hold=str(raw.get("end_card_hold") or "3.0"),
+            music_path=music if music else None,
+            music_volume=str(raw.get("music_volume") or "0.35"),
+            music_fade_in=str(raw.get("music_fade_in") or "1.0"),
+            music_fade_out=str(raw.get("music_fade_out") or "1.5"),
+            music_duck=bool(raw.get("music_duck")),
+            transition=str(raw.get("transition") or "crossfade"),
+            transition_dur=str(raw.get("transition_dur") or "0.6"),
         )
 
 

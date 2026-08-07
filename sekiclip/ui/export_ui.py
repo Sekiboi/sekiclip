@@ -155,6 +155,50 @@ class ExportMixin:
             vfi = vfo = afi = afo = 0.0
         return max(0.0, vfi), max(0.0, vfo), max(0.0, afi), max(0.0, afo)
 
+    def _film_kwargs(self, look: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Film-making kwargs for render_cut (color, VFX, titles, music, end card)."""
+        a = look if look is not None else self._live_settings()
+
+        def _f(key: str, default: float) -> float:
+            try:
+                return float(a.get(key) if a.get(key) not in (None, "") else default)
+            except (TypeError, ValueError):
+                return default
+
+        music = a.get("music_path")
+        music_path = Path(str(music)) if music else None
+        if music_path and not music_path.is_file():
+            music_path = None
+        return {
+            "color_look": str(a.get("color_look") or "none"),
+            "color_strength": max(0.0, min(1.0, _f("color_strength", 1.0))),
+            "vfx": str(a.get("vfx") or "none"),
+            "vfx_strength": max(0.0, min(1.0, _f("vfx_strength", 1.0))),
+            "title": str(a.get("title") or ""),
+            "title_sub": str(a.get("title_sub") or ""),
+            "title_position": str(a.get("title_position") or "center"),
+            "end_card": str(a.get("end_card") or ""),
+            "end_card_hold": max(0.5, _f("end_card_hold", 3.0)),
+            "music": music_path,
+            "music_volume": max(0.0, min(2.0, _f("music_volume", 0.35))),
+            "music_fade_in": max(0.0, _f("music_fade_in", 1.0)),
+            "music_fade_out": max(0.0, _f("music_fade_out", 1.5)),
+            "music_duck": bool(a.get("music_duck")),
+        }
+
+    def _has_film_fx(self, look: dict[str, Any] | None = None) -> bool:
+        a = look if look is not None else self._live_settings()
+        cl = str(a.get("color_look") or "none").lower()
+        vx = str(a.get("vfx") or "none").lower()
+        if cl not in ("", "none") or vx not in ("", "none"):
+            return True
+        if str(a.get("title") or "").strip() or str(a.get("end_card") or "").strip():
+            return True
+        music = a.get("music_path")
+        if music and Path(str(music)).is_file():
+            return True
+        return False
+
     def _crop_pixels(self, src: Path) -> tuple[int, int, int | None, int | None]:
         """Crop x,y,w,h from current overlay (or margin)."""
         if not self.var_use_crop.get() and not self._crop_mode:
@@ -757,6 +801,7 @@ class ExportMixin:
         use_subs = bool(a.get("use_subs") and srt_path)
         logo_pos = str(a.get("logo_pos") or "top-right")
         logo_scale = float(a.get("logo_scale") or 0.15)
+        film = self._film_kwargs(a)
 
         def run(src: Path, dest: Path) -> Path:
             if act == "render_cut":
@@ -786,6 +831,7 @@ class ExportMixin:
                     audio_bitrate=audio_br,
                     scale=scale,
                     prefer_gpu=self._prefer_gpu(),
+                    **film,
                 )
             if act == "crop":
                 return ops.crop_video(src, dest, margin=margin)
@@ -1019,6 +1065,7 @@ class ExportMixin:
             vfo = look["video_fade_out"]
             afi = look["audio_fade_in"]
             afo = look["audio_fade_out"]
+            film_live = self._live_settings()
             has_fx = (
                 vfi > 0
                 or vfo > 0
@@ -1030,6 +1077,7 @@ class ExportMixin:
                 or abs(float(look["speed"]) - 1.0) > 1e-3
                 or look.get("mute")
                 or abs(float(self.var_volume.get() or 1.0) - 1.0) > 1e-3
+                or self._has_film_fx(film_live)
             ) and suffix.lower() not in (
                 ".mp3",
                 ".wav",
@@ -1097,6 +1145,7 @@ class ExportMixin:
                         scale=scale,
                         prefer_gpu=self._prefer_gpu(),
                         on_progress=prog,
+                        **self._film_kwargs(film_live),
                     )
                 except CancelledError:
                     note("  Trim cancelled.")
@@ -1264,6 +1313,8 @@ class ExportMixin:
                     f" · video {self._video_quality_key()}"
                     f" · audio {self._audio_quality_key()} ({audio_br})"
                 )
+                film_live = self._live_settings()
+                film_kw = self._film_kwargs(film_live)
                 if act == "render_cut":
                     bits = []
                     if cw and ch:
@@ -1280,6 +1331,18 @@ class ExportMixin:
                         bits.append("subs")
                     if look.get("flip_h"):
                         bits.append("flip")
+                    cl = str(film_kw.get("color_look") or "none")
+                    if cl not in ("", "none"):
+                        bits.append(f"look {cl}")
+                    vx = str(film_kw.get("vfx") or "none")
+                    if vx not in ("", "none"):
+                        bits.append(f"vfx {vx}")
+                    if film_kw.get("title"):
+                        bits.append("title")
+                    if film_kw.get("end_card"):
+                        bits.append("end card")
+                    if film_kw.get("music"):
+                        bits.append("music bed")
                     if bits:
                         note(f"  Options: {', '.join(bits)}")
                 prog(0.03, f"{act}: encoding…")
@@ -1313,6 +1376,7 @@ class ExportMixin:
                             scale=scale,
                             prefer_gpu=self._prefer_gpu(),
                             on_progress=prog,
+                            **film_kw,
                         )
                     else:
                         out = ops.fade_media(
@@ -1629,6 +1693,22 @@ class ExportMixin:
             "audio_quality": _normalize_audio_quality(
                 str(a.get("audio_quality") or a.get("cut_quality") or AUDIO_QUALITY_DEFAULT_KEY)
             ),
+            "color_look": str(a.get("color_look") or "none"),
+            "color_strength": str(a.get("color_strength") or "1.0"),
+            "vfx": str(a.get("vfx") or "none"),
+            "vfx_strength": str(a.get("vfx_strength") or "1.0"),
+            "title": str(a.get("title") or ""),
+            "title_sub": str(a.get("title_sub") or ""),
+            "title_position": str(a.get("title_position") or "center"),
+            "end_card": str(a.get("end_card") or ""),
+            "end_card_hold": str(a.get("end_card_hold") or "3.0"),
+            "music_path": a.get("music_path"),
+            "music_volume": str(a.get("music_volume") or "0.35"),
+            "music_fade_in": str(a.get("music_fade_in") or "1.0"),
+            "music_fade_out": str(a.get("music_fade_out") or "1.5"),
+            "music_duck": bool(a.get("music_duck")),
+            "transition": str(a.get("transition") or "crossfade"),
+            "transition_dur": str(a.get("transition_dur") or "0.6"),
         }
 
     def _apply_export_preset(self, choice: str | None = None) -> None:

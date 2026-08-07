@@ -376,12 +376,35 @@ def render_cut(
     audio_bitrate: str = "192k",
     scale: str | None = None,
     prefer_gpu: bool = False,
+    # Film-making (roadmap phases A–B)
+    color_look: str = "none",
+    color_strength: float = 1.0,
+    vfx: str = "none",
+    vfx_strength: float = 1.0,
+    title: str = "",
+    title_sub: str = "",
+    title_position: str = "center",
+    end_card: str = "",
+    end_card_hold: float = 3.0,
+    music: Path | str | None = None,
+    music_volume: float = 0.35,
+    music_fade_in: float = 1.0,
+    music_fade_out: float = 1.5,
+    music_duck: bool = False,
     on_progress: Callable[[float, str], None] | None = None,
 ) -> Path:
-    """One-pass edit: cut + video/audio fades + optional effects (single encode).
+    """One-pass edit: cut + fades + looks/VFX/titles/music bed (single encode).
 
     ``prefer_gpu`` tries hardware H.264 when available; always falls back to libx264.
     """
+    from sekiclip.media_ops.film_fx import (
+        color_look_filter,
+        end_card_filter,
+        title_filters,
+        vfx_filter,
+    )
+    from sekiclip.preview.match import atempo_chain, export_fade_filter_pairs
+
     src = Path(src)
     out = _out(src, dest, ".mp4", "cut")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -418,13 +441,26 @@ def render_cut(
     if abs(sp - 1.0) > 1e-3:
         v_parts.append(f"setpts=PTS/{sp}")
     if scale:
-        v_parts.append(f"scale={scale}")
+        # contain-fit into WxH box
+        if ":" in str(scale) and "force" not in str(scale):
+            sw, sh = str(scale).split(":", 1)
+            v_parts.append(
+                f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,"
+                f"pad={sw}:{sh}:(ow-iw)/2:(oh-ih)/2"
+            )
+        else:
+            v_parts.append(f"scale={scale}")
+    v_parts.extend(color_look_filter(color_look, color_strength))
+    v_parts.extend(vfx_filter(vfx, vfx_strength))
     if srt and has_video:
         srt_p = Path(srt)
         if srt_p.is_file():
             sub = str(srt_p.resolve()).replace("\\", "/").replace(":", "\\:")
             v_parts.append(f"subtitles='{sub}'")
-    from sekiclip.preview.match import atempo_chain, export_fade_filter_pairs
+    v_parts.extend(
+        title_filters(title, subtitle=title_sub, position=title_position)
+    )
+    v_parts.extend(end_card_filter(end_card, hold=end_card_hold, out_dur=out_dur))
 
     # Fades on the *output* cut timeline (after speed). N seconds before Out.
     v_fade_bits, a_fade_bits = export_fade_filter_pairs(
@@ -436,8 +472,7 @@ def render_cut(
     )
     v_parts.extend(v_fade_bits)
 
-    # --- audio filters ---
-    # Order: trim → reset timestamps → tempo/volume → afade (same as preview_match)
+    # --- main audio filters ---
     a_parts: list[str] = [
         f"atrim=start={start}:end={end}",
         "asetpts=PTS-STARTPTS",
@@ -450,15 +485,25 @@ def render_cut(
             a_parts.append(f"volume={vol}")
     a_parts.extend(atempo_chain(sp))
     a_parts.extend(a_fade_bits)
-    # Keep audio as long as the video cut (avoids hard stop if stream is slightly short)
     if has_audio and out_dur > 0:
         a_parts.append(f"apad=whole_dur={out_dur:.4f}")
 
     logo_path = Path(logo) if logo else None
     use_logo = bool(has_video and logo_path and logo_path.is_file())
+    music_path = Path(music) if music else None
+    use_music = bool(music_path and music_path.is_file())
 
     fc_bits: list[str] = []
     maps: list[str] = []
+    # Input indices: 0=src, then logo, then music
+    next_in = 1
+    logo_in = music_in = -1
+    if use_logo:
+        logo_in = next_in
+        next_in += 1
+    if use_music:
+        music_in = next_in
+        next_in += 1
 
     if has_video:
         if use_logo:
@@ -477,7 +522,7 @@ def render_cut(
                 xy = "W-w-10:10"
             fc_bits.append(f"[0:v]{','.join(v_parts)}[vbase]")
             fc_bits.append(
-                f"[1:v]scale=iw*{sc}:-1,format=rgba,colorchannelmixer=aa={op}[lg]"
+                f"[{logo_in}:v]scale=iw*{sc}:-1,format=rgba,colorchannelmixer=aa={op}[lg]"
             )
             fc_bits.append(f"[vbase][lg]overlay={xy}[vout]")
             maps.extend(["-map", "[vout]"])
@@ -485,18 +530,54 @@ def render_cut(
             fc_bits.append(f"[0:v]{','.join(v_parts)}[vout]")
             maps.extend(["-map", "[vout]"])
 
-    if has_audio:
+    # Audio: main [+ music bed]
+    if use_music:
+        mv = max(0.0, min(2.0, float(music_volume)))
+        mfi = max(0.0, float(music_fade_in))
+        mfo = max(0.0, float(music_fade_out))
+        m_parts = [
+            f"atrim=0:{out_dur:.4f}",
+            "asetpts=PTS-STARTPTS",
+            f"volume={mv}",
+            f"apad=whole_dur={out_dur:.4f}",
+        ]
+        if mfi > 0.01:
+            m_parts.append(f"afade=t=in:st=0:d={mfi:.3f}")
+        if mfo > 0.01 and out_dur > mfo:
+            m_parts.append(f"afade=t=out:st={max(0.0, out_dur - mfo):.3f}:d={mfo:.3f}")
+        if music_duck and has_audio and not mute:
+            # sidechaincompress: bed ducks under main dialogue energy
+            fc_bits.append(f"[0:a]{','.join(a_parts)}[amain]")
+            fc_bits.append(f"[{music_in}:a]{','.join(m_parts)}[amus]")
+            fc_bits.append(
+                "[amus][amain]sidechaincompress=threshold=0.05:ratio=6:attack=50:release=300[aduck]"
+            )
+            fc_bits.append("[amain][aduck]amix=inputs=2:duration=first:dropout_transition=0[aout]")
+        elif has_audio and not mute:
+            fc_bits.append(f"[0:a]{','.join(a_parts)}[amain]")
+            fc_bits.append(f"[{music_in}:a]{','.join(m_parts)}[amus]")
+            fc_bits.append(
+                "[amain][amus]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]"
+            )
+        else:
+            # Music only (muted main or no main audio)
+            fc_bits.append(f"[{music_in}:a]{','.join(m_parts)}[aout]")
+        maps.extend(["-map", "[aout]"])
+    elif has_audio:
         fc_bits.append(f"[0:a]{','.join(a_parts)}[aout]")
         maps.extend(["-map", "[aout]"])
 
     args_base: list[str] = ["-i", str(src)]
     if use_logo:
         args_base.extend(["-i", str(logo_path)])
+    if use_music:
+        args_base.extend(["-i", str(music_path)])
     args_base.extend(["-filter_complex", ";".join(fc_bits)])
     args_base.extend(maps)
 
+    want_audio = has_audio or use_music
     audio_args: list[str] = []
-    if has_audio:
+    if want_audio:
         audio_args.extend(["-c:a", "aac", "-b:a", str(audio_bitrate)])
     tail = ["-movflags", "+faststart", "-t", f"{out_dur:.4f}", str(out)]
 
@@ -507,7 +588,7 @@ def render_cut(
             args_base,
             crf=int(crf),
             preset=str(preset),
-            audio_args=audio_args if has_audio else ["-an"],
+            audio_args=audio_args if want_audio else ["-an"],
             tail_args=tail,
             prefer_gpu=bool(prefer_gpu),
             out=out,
@@ -522,6 +603,151 @@ def render_cut(
             duration_hint=out_dur if on_progress else None,
         )
     return out
+
+
+def assemble_shots(
+    clips: list[Path | str],
+    dest: Path | str,
+    *,
+    transition: str = "crossfade",
+    transition_dur: float = 0.6,
+    crf: int = 20,
+    preset: str = "fast",
+    audio_bitrate: str = "192k",
+) -> Path:
+    """Join clips with xfade transitions (or hard cut). Offline only."""
+    from sekiclip.media_ops.film_fx import transition_name
+    from sekiclip.media_ops.video import concat_videos
+
+    paths = [Path(c) for c in clips if Path(c).is_file()]
+    if len(paths) < 1:
+        raise ValueError("Need at least one clip")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if len(paths) == 1:
+        run_ffmpeg(
+            [
+                "-i",
+                str(paths[0]),
+                "-c:v",
+                "libx264",
+                "-crf",
+                str(crf),
+                "-preset",
+                preset,
+                "-c:a",
+                "aac",
+                "-b:a",
+                audio_bitrate,
+                "-movflags",
+                "+faststart",
+                str(dest),
+            ]
+        )
+        return dest
+
+    tname = transition_name(transition)
+    td = max(0.05, float(transition_dur))
+    if tname == "cut":
+        return concat_videos(paths, dest)
+
+    # xfade chain (video). Audio: acrossfade when both have audio.
+    # Normalize each to 1080p first for xfade compatibility.
+    tmp_dir = dest.parent / f".sekiclip_asm_{dest.stem}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    norms: list[Path] = []
+    durs: list[float] = []
+    try:
+        for i, p in enumerate(paths):
+            n = tmp_dir / f"n{i:02d}.mp4"
+            run_ffmpeg(
+                [
+                    "-i",
+                    str(p),
+                    "-vf",
+                    "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1,format=yuv420p",
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "18",
+                    "-preset",
+                    "veryfast",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    str(n),
+                ]
+            )
+            norms.append(n)
+            durs.append(float((probe(n).get("format") or {}).get("duration") or 1.0))
+
+        # Build xfade filter
+        fc: list[str] = []
+        # offset accumulates: offset_i = sum(d[0..i]) - td*(i)
+        offset = 0.0
+        prev = "[0:v]"
+        for i in range(1, len(norms)):
+            offset = sum(durs[:i]) - td * i
+            offset = max(0.0, offset)
+            out_lab = f"[vx{i}]" if i < len(norms) - 1 else "[vout]"
+            fc.append(
+                f"{prev}[{i}:v]xfade=transition={tname}:duration={td:.3f}:offset={offset:.3f}{out_lab}"
+            )
+            prev = out_lab
+            # acrossfade audio if possible
+        # Audio chain with acrossfade
+        aprev = "[0:a]"
+        for i in range(1, len(norms)):
+            aout = f"[ax{i}]" if i < len(norms) - 1 else "[aout]"
+            fc.append(f"{aprev}[{i}:a]acrossfade=d={td:.3f}{aout}")
+            aprev = aout
+
+        args: list[str] = []
+        for n in norms:
+            args.extend(["-i", str(n)])
+        args.extend(
+            [
+                "-filter_complex",
+                ";".join(fc),
+                "-map",
+                "[vout]",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "libx264",
+                "-crf",
+                str(crf),
+                "-preset",
+                preset,
+                "-c:a",
+                "aac",
+                "-b:a",
+                audio_bitrate,
+                "-movflags",
+                "+faststart",
+                str(dest),
+            ]
+        )
+        try:
+            run_ffmpeg(args)
+        except Exception:
+            # Fallback hard concat if xfade fails (e.g. missing audio)
+            warn("xfade assemble failed — falling back to hard concat.")
+            return concat_videos(norms, dest)
+        return dest
+    finally:
+        try:
+            for p in tmp_dir.glob("*"):
+                p.unlink(missing_ok=True)
+            tmp_dir.rmdir()
+        except OSError:
+            pass
 
 
 def flip_video(

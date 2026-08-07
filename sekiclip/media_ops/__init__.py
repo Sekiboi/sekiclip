@@ -11,6 +11,7 @@ from sekiclip.media_ops.batch import batch_to_folder
 from sekiclip.media_ops.edit import (
     SPEED_PRESETS,
     adjust_volume,
+    assemble_shots,
     burn_subtitles,
     change_speed,
     crop_video,
@@ -20,6 +21,12 @@ from sekiclip.media_ops.edit import (
     logo_overlay,
     render_cut,
     target_size_video,
+)
+from sekiclip.media_ops.film_fx import (
+    COLOR_LOOKS,
+    PLATFORM_PRESETS,
+    TRANSITIONS,
+    VFX_PRESETS,
 )
 from sekiclip.media_ops.ffmpeg_util import (
     CancelledError,
@@ -58,12 +65,17 @@ from sekiclip.media_ops.video import (
 
 __all__ = [
     "AUDIO_FORMATS",
+    "COLOR_LOOKS",
     "COMPRESS_PRESETS",
     "CancelledError",
     "IMAGE_EXTS",
+    "PLATFORM_PRESETS",
     "SPEED_PRESETS",
+    "TRANSITIONS",
+    "VFX_PRESETS",
     "VIDEO_FORMATS",
     "adjust_volume",
+    "assemble_shots",
     "batch_to_folder",
     "burn_subtitles",
     "change_speed",

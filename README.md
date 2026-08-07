@@ -41,7 +41,18 @@ If Windows says **“Windows protected your PC”** (unsigned beta): More info �
 - Timeline In/Out · Play → Out · Loop cut  
 - Export quality (resolution + audio kbps)  
 - Fades, crop, volume, speed, GIF, logo, burn SRT  
+- **Film looks:** color presets, light VFX, titles, end card, music bed (+ duck)  
+- **Assemble** (CLI): join clips with crossfade / dip / wipe  
 - Convert, compress, extract audio, images, batch  
 
 Preview may look softer than export. **Final quality is the exported file.**  
-Not a multi-track NLE — [limits](docs/LIMITS.md) · [privacy](docs/PRIVACY.md)
+Not a multi-track NLE — [limits](docs/LIMITS.md) · [privacy](docs/PRIVACY.md) · [roadmap](docs/ROADMAP_PRODUCT.md)
+
+```bash
+# Example: one-pass film cut
+python -m sekiclip render-cut clip.mp4 -o out.mp4 --color-look warm --vfx vignette \
+  --title "Open" --end-card "Thanks" --music bed.mp3 --music-duck
+
+# Join shots with transitions
+python -m sekiclip assemble a.mp4 b.mp4 c.mp4 -o film.mp4 --transition crossfade
+```

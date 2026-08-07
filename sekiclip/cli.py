@@ -255,6 +255,36 @@ def cmd_render_cut(args: argparse.Namespace) -> int:
             crf=int(args.crf or 18),
             preset=args.preset or "medium",
             audio_bitrate=args.audio_bitrate or "192k",
+            color_look=args.color_look or "none",
+            color_strength=float(args.color_strength or 1.0),
+            vfx=args.vfx or "none",
+            vfx_strength=float(args.vfx_strength or 1.0),
+            title=args.title or "",
+            title_sub=args.title_sub or "",
+            title_position=args.title_position or "center",
+            end_card=args.end_card or "",
+            end_card_hold=float(args.end_card_hold or 3.0),
+            music=args.music,
+            music_volume=float(args.music_volume or 0.35),
+            music_fade_in=float(args.music_fade_in or 1.0),
+            music_fade_out=float(args.music_fade_out or 1.5),
+            music_duck=bool(args.music_duck),
+        )
+    )
+    return 0
+
+
+def cmd_assemble(args: argparse.Namespace) -> int:
+    dest = _out(args) or Path("assembled.mp4")
+    print(
+        ops.assemble_shots(
+            list(args.inputs),
+            dest,
+            transition=args.transition or "crossfade",
+            transition_dur=float(args.transition_dur or 0.6),
+            crf=int(args.crf or 20),
+            preset=args.preset or "fast",
+            audio_bitrate=args.audio_bitrate or "192k",
         )
     )
     return 0
@@ -473,7 +503,46 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--crf", type=int, default=18)
     s.add_argument("--preset", default="medium")
     s.add_argument("--audio-bitrate", default="192k")
+    s.add_argument(
+        "--color-look",
+        default="none",
+        help="none|warm|cool|documentary|night|soft_film|high_contrast|bw|sepia",
+    )
+    s.add_argument("--color-strength", type=float, default=1.0)
+    s.add_argument(
+        "--vfx",
+        default="none",
+        help="none|vignette|grain|soft|sharpen|bloom",
+    )
+    s.add_argument("--vfx-strength", type=float, default=1.0)
+    s.add_argument("--title", default="")
+    s.add_argument("--title-sub", default="")
+    s.add_argument("--title-position", default="center", help="center|lower-third|top")
+    s.add_argument("--end-card", default="")
+    s.add_argument("--end-card-hold", type=float, default=3.0)
+    s.add_argument("--music", default=None, help="Music/voice bed audio file")
+    s.add_argument("--music-volume", type=float, default=0.35)
+    s.add_argument("--music-fade-in", type=float, default=1.0)
+    s.add_argument("--music-fade-out", type=float, default=1.5)
+    s.add_argument("--music-duck", action="store_true", help="Duck bed under dialogue")
     s.set_defaults(func=cmd_render_cut)
+
+    s = sub.add_parser(
+        "assemble",
+        help="Join clips with transitions (crossfade, dip black, wipe, …)",
+    )
+    s.add_argument("inputs", nargs="+", help="Clip paths in order")
+    s.add_argument("-o", "--output", required=True)
+    s.add_argument(
+        "--transition",
+        default="crossfade",
+        help="cut|crossfade|dip_black|dip_white|wipe_left|slide_left|…",
+    )
+    s.add_argument("--transition-dur", type=float, default=0.6)
+    s.add_argument("--crf", type=int, default=20)
+    s.add_argument("--preset", default="fast")
+    s.add_argument("--audio-bitrate", default="192k")
+    s.set_defaults(func=cmd_assemble)
 
     s = sub.add_parser("flip", help="Flip video or image")
     s.add_argument("input")

@@ -214,8 +214,25 @@ class SessionUiMixin:
                 self._crop_rect = (float(cr[0]), float(cr[1]), float(cr[2]), float(cr[3]))
             srt = look.get("srt_path") or ""
             logo = look.get("logo_path") or ""
+            music = look.get("music_path") or ""
             self._srt_path = Path(srt) if srt and Path(srt).is_file() else None
             self._logo_path = Path(logo) if logo and Path(logo).is_file() else None
+            self._music_path = Path(music) if music and Path(music).is_file() else None
+            self.var_color_look.set(str(look.get("color_look") or "none"))
+            self.var_color_strength.set(str(look.get("color_strength") or "1.0"))
+            self.var_vfx.set(str(look.get("vfx") or "none"))
+            self.var_vfx_strength.set(str(look.get("vfx_strength") or "1.0"))
+            self.var_title.set(str(look.get("title") or ""))
+            self.var_title_sub.set(str(look.get("title_sub") or ""))
+            self.var_title_position.set(str(look.get("title_position") or "center"))
+            self.var_end_card.set(str(look.get("end_card") or ""))
+            self.var_end_card_hold.set(str(look.get("end_card_hold") or "3.0"))
+            self.var_music_volume.set(str(look.get("music_volume") or "0.35"))
+            self.var_music_fade_in.set(str(look.get("music_fade_in") or "1.0"))
+            self.var_music_fade_out.set(str(look.get("music_fade_out") or "1.5"))
+            self.var_music_duck.set(bool(look.get("music_duck")))
+            self.var_transition.set(str(look.get("transition") or "crossfade"))
+            self.var_transition_dur.set(str(look.get("transition_dur") or "0.6"))
             self._update_edit_files_label()
             inn = float(snap.get("in") or 0)
             out = snap.get("out")
