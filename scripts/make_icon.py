@@ -1,7 +1,8 @@
-"""Regenerate assets/sekiclip.png and assets/sekiclip.ico.
+"""Regenerate Sekiclip icons + Inno Setup wizard images.
 
-Play wedge on rounded square — same plate blue as Sekikit brand.
-Play mark is a compact equilateral-style triangle with generous padding.
+Play wedge on rounded square — Sekikit plate blue (47, 111, 168).
+Play size: first fixed proportions (compact, not stretched / not tiny).
+Also writes wizard_image.bmp + wizard_small.bmp for the Setup wizard.
 """
 
 from __future__ import annotations
@@ -15,6 +16,9 @@ ASSETS = ROOT / "assets"
 # Match Sekikit icon plate
 PLATE = (47, 111, 168, 255)
 WHITE = (255, 255, 255, 255)
+# Inno Setup classic wizard bitmap sizes
+WIZARD_LARGE = (164, 314)
+WIZARD_SMALL = (55, 55)
 
 
 def draw_icon(size: int, with_plate: bool = True) -> Image.Image:
@@ -30,21 +34,49 @@ def draw_icon(size: int, with_plate: bool = True) -> Image.Image:
             fill=PLATE,
         )
 
-    # Compact equilateral play — ~20% of canvas so the plate reads clearly.
-    # Optical center: slight left shift so the triangle mass feels centered.
+    # First fixed play triangle: balanced, not full-bleed, not elongated.
     ink = WHITE if with_plate else PLATE
     cx = s * 0.5
     cy = s * 0.5
-    side = s * 0.22  # vertical base length
-    height = side * 0.86602540378  # equilateral tip distance
-    ox = cx - height * 0.10
-    x0 = ox - height * 0.28
-    x1 = ox + height * 0.72
-    y0 = cy - side * 0.5
-    y1 = cy + side * 0.5
-    tri = [(x0, y0), (x0, y1), (x1, cy)]
+    ox = cx - s * 0.03
+    half_h = s * 0.155
+    depth = s * 0.26
+    tri = [
+        (ox - depth * 0.35, cy - half_h),
+        (ox - depth * 0.35, cy + half_h),
+        (ox + depth * 0.65, cy),
+    ]
     d.polygon(tri, fill=ink)
     return img
+
+
+def _to_bmp_rgb(img: Image.Image) -> Image.Image:
+    """Inno wizard images are most reliable as 24-bit BMP (no alpha)."""
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, PLATE[:3])
+        bg.paste(img, mask=img.split()[3])
+        return bg
+    return img.convert("RGB")
+
+
+def draw_wizard_large() -> Image.Image:
+    """Tall welcome-page panel: plate fill + centered app icon."""
+    w, h = WIZARD_LARGE
+    canvas = Image.new("RGB", (w, h), PLATE[:3])
+    icon_px = min(w - 24, 120)
+    icon = draw_icon(icon_px * 2, True).resize((icon_px, icon_px), Image.Resampling.LANCZOS)
+    icon_rgb = _to_bmp_rgb(icon)
+    x = (w - icon_px) // 2
+    y = (h - icon_px) // 2 - h // 12  # slightly high for visual balance
+    canvas.paste(icon_rgb, (x, y))
+    return canvas
+
+
+def draw_wizard_small() -> Image.Image:
+    """Top-right corner icon on non-welcome wizard pages."""
+    w, h = WIZARD_SMALL
+    icon = draw_icon(128, True).resize((w, h), Image.Resampling.LANCZOS)
+    return _to_bmp_rgb(icon)
 
 
 def main() -> None:
@@ -52,7 +84,7 @@ def main() -> None:
     draw_icon(512, True).save(ASSETS / "sekiclip.png")
     draw_icon(512, False).save(ASSETS / "sekiclip_mark.png")
 
-    # Proper multi-resolution ICO (Windows taskbar / installer)
+    # Multi-resolution ICO (exe / shortcuts / SetupIconFile)
     ico_frames = [draw_icon(s, True) for s in (16, 24, 32, 48, 64, 128, 256)]
     ico_frames[0].save(
         ASSETS / "sekiclip.ico",
@@ -60,9 +92,16 @@ def main() -> None:
         sizes=[(im.width, im.height) for im in ico_frames],
         append_images=ico_frames[1:],
     )
+
+    # Inno Setup wizard graphics (BMP)
+    draw_wizard_large().save(ASSETS / "wizard_image.bmp", format="BMP")
+    draw_wizard_small().save(ASSETS / "wizard_small.bmp", format="BMP")
+
     print(f"Wrote {ASSETS / 'sekiclip.png'}")
     print(f"Wrote {ASSETS / 'sekiclip_mark.png'}")
     print(f"Wrote {ASSETS / 'sekiclip.ico'}")
+    print(f"Wrote {ASSETS / 'wizard_image.bmp'}")
+    print(f"Wrote {ASSETS / 'wizard_small.bmp'}")
 
 
 if __name__ == "__main__":

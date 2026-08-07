@@ -29,6 +29,10 @@ InfoAfterFile=..\scripts\installer_info_after.txt
 OutputDir=..\dist
 OutputBaseFilename=Sekiclip-{#MyAppVersion}-Setup
 SetupIconFile=..\assets\sekiclip.ico
+; Welcome-page side art + small corner logo on other pages
+WizardImageFile=..\assets\wizard_image.bmp
+WizardSmallImageFile=..\assets\wizard_small.bmp
+WizardImageStretch=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 Compression=lzma2/max
