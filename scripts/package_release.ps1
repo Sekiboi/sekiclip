@@ -64,8 +64,32 @@ $Version = & $venvPython -c "from sekiclip import __version__; print(__version__
 Write-Host "Version: $Version"
 
 # ── Primary: Windows wizard Setup.exe ────────────────────────────────
+# Copy branding next to the .iss so Inno resolves paths reliably (same folder).
+$SetupAssets = Join-Path $Root "scripts\setup_assets"
+New-Item -ItemType Directory -Force -Path $SetupAssets | Out-Null
+foreach ($f in @("sekiclip.ico", "wizard_image.bmp", "wizard_small.bmp")) {
+    $src = Join-Path $Root "assets\$f"
+    if (-not (Test-Path -LiteralPath $src)) {
+        Write-Error "Missing branding asset for installer: $src - run scripts\make_icon.py"
+    }
+    Copy-Item -LiteralPath $src -Destination (Join-Path $SetupAssets $f) -Force
+    $len = (Get-Item -LiteralPath $src).Length
+    Write-Host ("Setup asset: {0} ({1} bytes)" -f $f, $len)
+}
+
+# Icon next to app exe (shells / icon cache helpers)
+Copy-Item (Join-Path $Root "assets\sekiclip.ico") (Join-Path $DistApp "sekiclip.ico") -Force
+Copy-Item (Join-Path $Root "assets\sekiclip.png") (Join-Path $DistApp "sekiclip.png") -Force
+
 Write-Host "Building Setup wizard (Inno Setup)..."
-& $Iscc (Join-Path $Root "scripts\setup_sekiclip.iss")
+$iss = Join-Path $Root "scripts\setup_sekiclip.iss"
+if (-not (Test-Path (Join-Path $SetupAssets "wizard_image.bmp"))) {
+    Write-Error "wizard_image.bmp not staged for Inno"
+}
+if (-not (Test-Path (Join-Path $SetupAssets "sekiclip.ico"))) {
+    Write-Error "sekiclip.ico not staged for Inno"
+}
+& $Iscc $iss
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Inno Setup compile failed (exit $LASTEXITCODE)"
 }

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sekiclip"
-version = "0.1.0b1"
+version = "0.1.0b2"
 description = "Offline media toolkit — convert, compress, trim. Free forever, no uploads."
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,10 +1,9 @@
-; Sekiclip — end-user Windows installer (wizard).
-; No admin. Installs for the current Windows user only.
-; Build: package_release.ps1 (calls ISCC after PyInstaller).
+; Sekiclip end-user Windows installer (Inno Setup 6+)
+; Build via scripts\package_release.ps1 (copies wizard art next to this file first).
 
 #define MyAppName "Sekiclip"
-#define MyAppVersion "0.1.0-beta.1"
-#define MyAppVersionInfo "0.1.0.1"
+#define MyAppVersion "0.1.0-beta.2"
+#define MyAppVersionInfo "0.1.0.2"
 #define MyAppPublisher "Sekiboi"
 #define MyAppExeName "Sekiclip.exe"
 #define MyAppURL "https://github.com/Sekiboi/sekiclip"
@@ -24,24 +23,24 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=no
 LicenseFile=..\LICENSE
-InfoBeforeFile=..\scripts\installer_info_before.txt
-InfoAfterFile=..\scripts\installer_info_after.txt
+InfoBeforeFile=installer_info_before.txt
+InfoAfterFile=installer_info_after.txt
 OutputDir=..\dist
 OutputBaseFilename=Sekiclip-{#MyAppVersion}-Setup
-SetupIconFile=..\assets\sekiclip.ico
-; Left panel (164:314 aspect) + small top icon — drawn in make_icon.py
-WizardImageFile=..\assets\wizard_image.bmp
-WizardSmallImageFile=..\assets\wizard_small.bmp
-; Keep aspect so play mark is not elongated (stretching was the wizard bug)
+; Icons / wizard art are copied into scripts\ by package_release.ps1 so paths stay local
+SetupIconFile=setup_assets\sekiclip.ico
+WizardImageFile=setup_assets\wizard_image.bmp
+WizardSmallImageFile=setup_assets\wizard_small.bmp
+; Classic left panel keeps 164:314 art from warping (modern can distort)
 WizardImageStretch=yes
-WizardImageBackColor=$2F6FA8
-WizardSmallImageBackColor=$2F6FA8
+WizardImageBackColor=$A86F2F
+WizardSmallImageBackColor=$A86F2F
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 Compression=lzma2/max
 SolidCompression=yes
-WizardStyle=modern
-WizardSizePercent=120,120
+WizardStyle=classic
+WizardSizePercent=100,100
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -51,14 +50,12 @@ RestartApplications=no
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
 AllowNoIcons=yes
-; Version resources on Setup.exe / uninstaller
 VersionInfoVersion={#MyAppVersionInfo}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersionInfo}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoTextVersion={#MyAppVersion}
-; Do not ask for restart
 AlwaysShowDirOnReadyPage=yes
 ShowLanguageDialog=no
 
@@ -77,22 +74,20 @@ ClickFinish=Click Finish to exit Setup.
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
 
 [Files]
-; App tree from PyInstaller onedir — never ship portable marker or installer scripts
 Source: "..\dist\Sekiclip\*"; DestDir: "{app}"; \
   Flags: ignoreversion recursesubdirs createallsubdirs; \
   Excludes: "sekiclip_portable.txt,Install-Sekiclip.cmd,install_user.ps1,HOW_TO_INSTALL.txt,Uninstall-Sekiclip.cmd,Uninstall-Sekiclip.ps1"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
   Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
 
 [UninstallDelete]
-; Only remove empty leftover dirs under the app folder if any
 Type: dirifempty; Name: "{app}"
 
 [Code]

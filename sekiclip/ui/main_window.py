@@ -202,10 +202,50 @@ class SekiclipApp(
         self.destroy()
 
     def _set_icons(self) -> None:
+        """Window icon from high-res PNG (Tk scales ICO poorly / first-entry only)."""
         try:
+            from PIL import ImageTk
+
+            png = _resource_path("assets", "sekiclip.png")
             ico = _resource_path("assets", "sekiclip.ico")
+            if getattr(sys, "frozen", False):
+                exe_dir = Path(sys.executable).resolve().parent
+                for cand in (
+                    exe_dir / "_internal" / "assets" / "sekiclip.png",
+                    exe_dir / "assets" / "sekiclip.png",
+                    exe_dir / "sekiclip.png",
+                ):
+                    if cand.is_file():
+                        png = cand
+                        break
+                for cand in (
+                    exe_dir / "_internal" / "assets" / "sekiclip.ico",
+                    exe_dir / "assets" / "sekiclip.ico",
+                    exe_dir / "sekiclip.ico",
+                ):
+                    if cand.is_file():
+                        ico = cand
+                        break
+
+            if png.is_file():
+                base = Image.open(png).convert("RGBA")
+                # Keep refs on self so Tk does not garbage-collect images
+                self._icon_photos = [
+                    ImageTk.PhotoImage(base.resize((e, e), Image.Resampling.LANCZOS))
+                    for e in (16, 32, 48, 64, 128, 256)
+                ]
+                try:
+                    self.iconphoto(True, *self._icon_photos)
+                except TypeError:
+                    self.iconphoto(True, self._icon_photos[-1])
             if ico.is_file():
-                self.iconbitmap(str(ico))
+                try:
+                    self.iconbitmap(default=str(ico))
+                except Exception:
+                    try:
+                        self.iconbitmap(str(ico))
+                    except Exception:
+                        pass
         except Exception:
             pass
 

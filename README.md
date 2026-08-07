@@ -11,7 +11,7 @@ Offline media editor for **Windows**. Preview, set In/Out, export.
   <img src="assets/sekiclip.png" width="96" height="96" alt="Sekiclip">
 </p>
 
-**Public beta** `0.1.0-beta.1` · Free forever (MIT)
+**Public beta** `0.1.0-beta.2` · Free forever (MIT)
 
 ---
 

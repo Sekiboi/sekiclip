@@ -22,6 +22,7 @@ vendor/*.exe
 *.egg-info/
 .mypy_cache/
 _reorg.py
+scripts/setup_assets/
 
 _t.png
 _t.webp
